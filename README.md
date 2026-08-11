@@ -165,6 +165,10 @@ The frontend reads the template list from `GET /api/templates` at startup so no 
 
 SSH key management across deployments, VLAN support for stronger multi-VM isolation, firewall rule editing from the UI, Longview graphs inline on the Instances page, Object Storage management, and a Terraform export for any provisioned stack.
 
+## Author
+
+**Kevin Lapommeray**
+
 ## License
 
 MIT — [github.com/fsu-kevin](https://github.com/fsu-kevin)

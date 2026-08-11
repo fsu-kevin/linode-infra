@@ -1,0 +1,17 @@
+{
+  "name": "linode-infra",
+  "version": "1.0.0",
+  "description": "Browser-based infrastructure provisioning portal for Akamai Cloud (Linode) — VM templates with firewall rules and cloud-init hardening baked in",
+  "private": true,
+  "scripts": {
+    "install:all": "npm install --prefix backend && npm install --prefix frontend",
+    "dev": "make dev"
+  },
+  "keywords": ["linode", "akamai", "infrastructure", "cloud", "devops", "provisioning", "firewall"],
+  "author": "Kevin Lapommeray",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/fsu-kevin/linode-infra"
+  }
+}

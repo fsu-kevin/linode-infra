@@ -9,12 +9,14 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       vm_ip: ${{ steps.get_ip.outputs.vm_ip }}
+      firewall_id: ${{ steps.setup_firewall.outputs.firewall_id }}
 
     steps:
       - name: Checkout
         uses: actions/checkout@v4
 
       - name: Setup firewall if not exists
+        id: setup_firewall
         run: |
           FIREWALL_ID=$(curl -s -H "Authorization: Bearer ${{ secrets.LINODE_TOKEN }}" \
             https://api.linode.com/v4/networking/firewalls | \
@@ -31,13 +33,6 @@ jobs:
                   "inbound_policy": "DROP",
                   "outbound_policy": "ACCEPT",
                   "inbound": [
-                    {
-                      "label": "accept-ssh",
-                      "action": "ACCEPT",
-                      "protocol": "TCP",
-                      "ports": "22",
-                      "addresses": {"ipv4": ["0.0.0.0/0"], "ipv6": ["::/0"]}
-                    },
                     {
                       "label": "accept-http",
                       "action": "ACCEPT",
@@ -59,7 +54,7 @@ jobs:
           else
             echo "Firewall already exists: $FIREWALL_ID"
           fi
-          echo "FIREWALL_ID=$FIREWALL_ID" >> $GITHUB_ENV
+          echo "firewall_id=$FIREWALL_ID" >> $GITHUB_OUTPUT
 
       - name: Provision VM if not exists
         run: |
@@ -77,7 +72,9 @@ jobs:
                 \"region\": \"us-east\",
                 \"type\": \"g6-nanode-1\",
                 \"label\": \"app-1\",
+                \"tags\": [\"linode-automation-app\"],
                 \"root_pass\": \"${{ secrets.VM_ROOT_PASS }}\",
+                \"authorized_keys\": [\"${{ secrets.SSH_PUBLIC_KEY }}\"],
                 \"private_ip\": true,
                 \"metadata\": {\"user_data\": \"$(base64 -w0 cloud-init.yaml)\"}
               }" | jq -r '.id')
@@ -87,7 +84,7 @@ jobs:
             echo "Assigning firewall to VM..."
             curl -s -H "Authorization: Bearer ${{ secrets.LINODE_TOKEN }}" \
               -H "Content-Type: application/json" \
-              -X POST https://api.linode.com/v4/networking/firewalls/${{ env.FIREWALL_ID }}/devices \
+              -X POST https://api.linode.com/v4/networking/firewalls/${{ steps.setup_firewall.outputs.firewall_id }}/devices \
               -d "{\"id\": $LINODE_ID, \"type\": \"linode\"}"
           else
             echo "VM already exists, skipping provision"
@@ -132,6 +129,29 @@ jobs:
     steps:
       - name: Checkout
         uses: actions/checkout@v4
+
+      - name: Allow SSH from runner IP
+        run: |
+          RUNNER_IP=$(curl -s https://api.ipify.org)
+          echo "Runner IP: $RUNNER_IP"
+          CURRENT_RULES=$(curl -s -H "Authorization: Bearer ${{ secrets.LINODE_TOKEN }}" \
+            https://api.linode.com/v4/networking/firewalls/${{ needs.provision.outputs.firewall_id }}/rules)
+
+          INBOUND=$(echo $CURRENT_RULES | jq '.inbound')
+          NEW_INBOUND=$(echo $INBOUND | jq --arg ip "$RUNNER_IP/32" '. + [{
+            "label": "temp-ssh-runner",
+            "action": "ACCEPT",
+            "protocol": "TCP",
+            "ports": "22",
+            "addresses": {"ipv4": [$ip]}
+          }]')
+
+          curl -s -H "Authorization: Bearer ${{ secrets.LINODE_TOKEN }}" \
+            -H "Content-Type: application/json" \
+            -X PUT https://api.linode.com/v4/networking/firewalls/${{ needs.provision.outputs.firewall_id }}/rules \
+            -d "{\"inbound_policy\": \"DROP\", \"outbound_policy\": \"ACCEPT\", \"inbound\": $NEW_INBOUND}"
+
+          echo "RUNNER_IP=$RUNNER_IP" >> $GITHUB_ENV
 
       - name: Setup SSH
         run: |
@@ -228,3 +248,17 @@ jobs:
             echo "=== Object storage ==="
             df -h | grep backup
           EOF
+
+      - name: Remove SSH runner access
+        if: always()
+        run: |
+          CURRENT_RULES=$(curl -s -H "Authorization: Bearer ${{ secrets.LINODE_TOKEN }}" \
+            https://api.linode.com/v4/networking/firewalls/${{ needs.provision.outputs.firewall_id }}/rules)
+
+          NEW_INBOUND=$(echo $CURRENT_RULES | jq '[.inbound[] | select(.label != "temp-ssh-runner")]')
+
+          curl -s -H "Authorization: Bearer ${{ secrets.LINODE_TOKEN }}" \
+            -H "Content-Type: application/json" \
+            -X PUT https://api.linode.com/v4/networking/firewalls/${{ needs.provision.outputs.firewall_id }}/rules \
+            -d "{\"inbound_policy\": \"DROP\", \"outbound_policy\": \"ACCEPT\", \"inbound\": $NEW_INBOUND}"
+          echo "SSH access removed from firewall"

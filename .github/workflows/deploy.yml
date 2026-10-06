@@ -177,32 +177,45 @@ jobs:
         run: |
           RUNNER_IP=$(curl -s https://api.ipify.org)
           echo "Runner IP: $RUNNER_IP"
+          echo "Firewall ID: ${{ needs.provision.outputs.firewall_id }}"
 
           CURRENT_RULES=$(curl -s \
             -H "Authorization: Bearer ${{ secrets.LINODE_TOKEN }}" \
             https://api.linode.com/v4/networking/firewalls/${{ needs.provision.outputs.firewall_id }}/rules)
+          echo "Current rules: $CURRENT_RULES"
 
-          NEW_INBOUND=$(echo $CURRENT_RULES | jq --arg ip "$RUNNER_IP/32" \
-            '[.inbound[] | select(.label != "temp-ssh-runner")] + [{
-              "label": "temp-ssh-runner",
-              "action": "ACCEPT",
-              "protocol": "TCP",
-              "ports": "22",
-              "addresses": {"ipv4": [$ip]}
-            }]')
+          BODY=$(echo $CURRENT_RULES | jq --arg ip "$RUNNER_IP/32" '{
+            inbound_policy: "DROP",
+            outbound_policy: "ACCEPT",
+            outbound: .outbound,
+            inbound: ([.inbound[] | select(.label != "temp-ssh-runner")] + [{
+              label: "temp-ssh-runner",
+              action: "ACCEPT",
+              protocol: "TCP",
+              ports: "22",
+              addresses: {ipv4: [$ip]}
+            }])
+          }')
 
-          curl -s \
+          RESPONSE=$(curl -s \
             -H "Authorization: Bearer ${{ secrets.LINODE_TOKEN }}" \
             -H "Content-Type: application/json" \
             -X PUT https://api.linode.com/v4/networking/firewalls/${{ needs.provision.outputs.firewall_id }}/rules \
-            -d "{\"inbound_policy\": \"DROP\", \"outbound_policy\": \"ACCEPT\", \"inbound\": $NEW_INBOUND}"
+            -d "$BODY")
+          echo "Firewall update response: $RESPONSE"
+
+          if echo $RESPONSE | jq -e '.errors' > /dev/null 2>&1; then
+            echo "Failed to update firewall rules"
+            exit 1
+          fi
           echo "SSH temporarily allowed from $RUNNER_IP"
 
       - name: Setup SSH
         run: |
           mkdir -p ~/.ssh
-          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
+          printf '%s\n' "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
           chmod 600 ~/.ssh/id_rsa
+          ssh-keygen -y -f ~/.ssh/id_rsa > /dev/null && echo "Private key is valid" || { echo "Private key is INVALID"; exit 1; }
           echo "Waiting for SSH to be ready on ${{ needs.provision.outputs.vm_ip }}..."
           for i in $(seq 1 20); do
             if ssh-keyscan -H ${{ needs.provision.outputs.vm_ip }} >> ~/.ssh/known_hosts 2>/dev/null; then
@@ -300,11 +313,16 @@ jobs:
             -H "Authorization: Bearer ${{ secrets.LINODE_TOKEN }}" \
             https://api.linode.com/v4/networking/firewalls/${{ needs.provision.outputs.firewall_id }}/rules)
 
-          NEW_INBOUND=$(echo $CURRENT_RULES | jq '[.inbound[] | select(.label != "temp-ssh-runner")]')
+          BODY=$(echo $CURRENT_RULES | jq '{
+            inbound_policy: "DROP",
+            outbound_policy: "ACCEPT",
+            outbound: .outbound,
+            inbound: [.inbound[] | select(.label != "temp-ssh-runner")]
+          }')
 
           curl -s \
             -H "Authorization: Bearer ${{ secrets.LINODE_TOKEN }}" \
             -H "Content-Type: application/json" \
             -X PUT https://api.linode.com/v4/networking/firewalls/${{ needs.provision.outputs.firewall_id }}/rules \
-            -d "{\"inbound_policy\": \"DROP\", \"outbound_policy\": \"ACCEPT\", \"inbound\": $NEW_INBOUND}"
+            -d "$BODY"
           echo "SSH access removed"

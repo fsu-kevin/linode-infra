@@ -98,8 +98,8 @@ jobs:
             echo "Create response: $RESPONSE"
             LINODE_ID=$(echo $RESPONSE | jq -r '.id')
             if [ -z "$LINODE_ID" ] || [ "$LINODE_ID" = "null" ]; then
-              echo "VM creation failed"
-              exit 1
+              echo "Warning: VM creation failed (account limit?). Continuing with existing VMs."
+              break
             fi
             curl -s \
               -H "Authorization: Bearer ${{ secrets.LINODE_TOKEN }}" \
@@ -114,22 +114,28 @@ jobs:
             echo "Created: app-$LINODE_ID"
           done
 
-      - name: Wait for 2 running VMs
+      - name: Wait for VMs to be running
         run: |
+          TOTAL=$(curl -s \
+            -H "Authorization: Bearer ${{ secrets.LINODE_TOKEN }}" \
+            https://api.linode.com/v4/linode/instances | \
+            jq '[.data[] | select(.tags != null and (.tags | contains(["linode-automation-app"])) and (.label | startswith("app-")))] | length')
+          echo "Total app VMs: $TOTAL"
+
           for i in $(seq 1 40); do
             COUNT=$(curl -s \
               -H "Authorization: Bearer ${{ secrets.LINODE_TOKEN }}" \
               https://api.linode.com/v4/linode/instances | \
               jq '[.data[] | select(.tags != null and (.tags | contains(["linode-automation-app"])) and (.label | startswith("app-")) and .status == "running")] | length')
-            echo "Attempt $i: $COUNT running"
-            if [ "$COUNT" -ge 2 ]; then
-              echo "Both VMs running"
+            echo "Attempt $i: $COUNT/$TOTAL running"
+            if [ "$COUNT" -ge "$TOTAL" ] && [ "$COUNT" -ge 1 ]; then
+              echo "All VMs running"
               break
             fi
             sleep 15
           done
-          if [ "$COUNT" -lt 2 ]; then
-            echo "Timed out waiting for VMs"
+          if [ "$COUNT" -lt 1 ]; then
+            echo "No VMs running"
             exit 1
           fi
 

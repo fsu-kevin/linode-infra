@@ -32,10 +32,27 @@ jobs:
               --root_pass "${{ secrets.VM_ROOT_PASS }}" \
               --private_ip true \
               --metadata.user_data "$(base64 -w0 cloud-init.yaml)"
-            echo "Waiting for VM to boot..."
-            sleep 120
           else
             echo "VM already exists, skipping provision"
+          fi
+
+      - name: Wait for VM to be running
+        env:
+          LINODE_CLI_TOKEN: ${{ secrets.LINODE_TOKEN }}
+        run: |
+          echo "Waiting for VM to reach running state..."
+          for i in $(seq 1 24); do
+            STATUS=$(linode-cli linodes list --json | jq -r '.[] | select(.label=="app-prod-1") | .status')
+            echo "Attempt $i: status=$STATUS"
+            if [ "$STATUS" = "running" ]; then
+              echo "VM is running"
+              break
+            fi
+            sleep 15
+          done
+          if [ "$STATUS" != "running" ]; then
+            echo "VM did not reach running state in time"
+            exit 1
           fi
 
       - name: Get VM IP
@@ -46,6 +63,10 @@ jobs:
           IP=$(linode-cli linodes list --json | jq -r '.[] | select(.label=="app-prod-1") | .ipv4[0]')
           echo "vm_ip=$IP" >> $GITHUB_OUTPUT
           echo "VM IP: $IP"
+          if [ -z "$IP" ]; then
+            echo "Failed to get VM IP"
+            exit 1
+          fi
 
   deploy:
     runs-on: ubuntu-latest

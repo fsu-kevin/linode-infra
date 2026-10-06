@@ -277,51 +277,8 @@ jobs:
             ssh root@$IP "cloud-init status --wait && echo cloud-init done"
             rsync -avz --exclude 'node_modules' --exclude '.git' ./ root@$IP:/opt/app/
             ssh root@$IP "hostnamectl set-hostname $LABEL"
-
-            ssh root@$IP << 'EOF'
-              echo "LINODE_TOKEN=${{ secrets.LINODE_TOKEN }}" > /opt/app/backend/.env
-              echo "PORT=3001" >> /opt/app/backend/.env
-
-              cd /opt/app/backend && npm install && npm run build
-              cd /opt/app/frontend && npm install && npm run build
-
-              printf 'server {\n    listen 80;\n    server_name _;\n\n    root /opt/app/frontend/dist;\n    index index.html;\n\n    location / {\n        try_files $uri $uri/ /index.html;\n    }\n\n    location /api {\n        proxy_pass http://localhost:3001;\n        proxy_http_version 1.1;\n        proxy_set_header Host $host;\n        proxy_set_header X-Real-IP $remote_addr;\n    }\n}\n' > /etc/nginx/sites-available/app
-              nginx -t && systemctl reload nginx
-
-              pm2 delete backend 2>/dev/null || true
-              pm2 start /opt/app/backend/dist/index.js --name "backend"
-              pm2 save
-
-              cp /opt/app/alloy/config.alloy /etc/alloy/config.alloy
-              cp /opt/app/vault/agent.hcl /etc/vault.d/agent.hcl
-              echo "${{ secrets.VAULT_AGENT_TOKEN }}" > /etc/vault.d/token
-              chmod 600 /etc/vault.d/token
-
-              printf '[Unit]\nDescription=Vault Agent\nAfter=network.target\n\n[Service]\nEnvironment=VAULT_ADDR=http://192.168.215.38:8200\nExecStart=/usr/bin/vault agent -config=/etc/vault.d/agent.hcl\nRestart=always\nRestartSec=5\n\n[Install]\nWantedBy=multi-user.target\n' > /etc/systemd/system/vault-agent.service
-              systemctl daemon-reload
-              systemctl enable vault-agent
-              systemctl restart vault-agent
-
-              export VAULT_ADDR="http://192.168.215.38:8200"
-              export VAULT_TOKEN=$(cat /etc/vault.d/token)
-              OBJ_KEY=$(vault kv get -field=object_storage_key secret/linode | tr -d '[:space:]')
-              OBJ_SECRET=$(vault kv get -field=object_storage_secret secret/linode | tr -d '[:space:]')
-              BUCKET=$(vault kv get -field=bucket_name secret/linode | tr -d '[:space:]/')
-              REGION=$(vault kv get -field=bucket_region secret/linode | tr -d '[:space:]')
-              echo "Mounting: $BUCKET ($REGION)"
-              echo "${OBJ_KEY}:${OBJ_SECRET}" > /root/.passwd-s3fs
-              chmod 600 /root/.passwd-s3fs
-              mkdir -p /mnt/backup
-              mountpoint -q /mnt/backup || s3fs ${BUCKET} /mnt/backup \
-                -o passwd_file=/root/.passwd-s3fs \
-                -o url=https://${REGION}.linodeobjects.com \
-                -o use_path_request_style
-              grep -q "s3fs" /etc/fstab || \
-                echo "${BUCKET} /mnt/backup fuse.s3fs _netdev,allow_other,use_path_request_style,passwd_file=/root/.passwd-s3fs,url=https://${REGION}.linodeobjects.com 0 0" >> /etc/fstab
-              mkdir -p /mnt/backup/configs
-              cp /etc/alloy/config.alloy /mnt/backup/configs/
-              cp /etc/vault.d/agent.hcl /mnt/backup/configs/
-EOF
+            ssh root@$IP "echo '${{ secrets.VAULT_AGENT_TOKEN }}' > /etc/vault.d/token && chmod 600 /etc/vault.d/token"
+            ssh root@$IP "chmod +x /opt/app/deploy/setup-vm.sh && LINODE_TOKEN='${{ secrets.LINODE_TOKEN }}' bash /opt/app/deploy/setup-vm.sh"
           done
 
       - name: Register NodeBalancer backends
@@ -364,21 +321,7 @@ EOF
             IP=$(echo $VM_IPS | jq -r ".[$idx]")
             LABEL=$(echo $VM_LABELS | jq -r ".[$idx]")
             echo "=== $LABEL ($IP) ==="
-            ssh root@$IP << 'EOF'
-              echo "hostname: $(hostname)"
-              echo "--- PM2 ---"
-              pm2 status
-              echo "--- backend logs ---"
-              pm2 logs backend --lines 10 --nostream
-              echo "--- vault-agent ---"
-              systemctl is-active vault-agent
-              echo "--- alloy ---"
-              curl -s http://localhost:12345/-/healthy || echo "not responding"
-              echo "--- nginx ---"
-              systemctl is-active nginx
-              echo "--- object storage ---"
-              df -h | grep backup || echo "not mounted"
-EOF
+            ssh root@$IP "hostname && pm2 status && pm2 logs backend --lines 10 --nostream && systemctl is-active vault-agent && curl -s http://localhost:12345/-/healthy || true && systemctl is-active nginx && df -h | grep backup || echo not-mounted"
           done
 
           echo "=== NodeBalancer backends ==="

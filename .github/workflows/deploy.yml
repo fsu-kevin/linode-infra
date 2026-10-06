@@ -14,26 +14,81 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
+      - name: Setup firewall if not exists
+        run: |
+          FIREWALL_ID=$(curl -s -H "Authorization: Bearer ${{ secrets.LINODE_TOKEN }}" \
+            https://api.linode.com/v4/networking/firewalls | \
+            jq -r '.data[] | select(.label=="linode-automation-app") | .id')
+
+          if [ -z "$FIREWALL_ID" ]; then
+            echo "Creating firewall..."
+            FIREWALL_ID=$(curl -s -H "Authorization: Bearer ${{ secrets.LINODE_TOKEN }}" \
+              -H "Content-Type: application/json" \
+              -X POST https://api.linode.com/v4/networking/firewalls \
+              -d '{
+                "label": "linode-automation-app",
+                "rules": {
+                  "inbound_policy": "DROP",
+                  "outbound_policy": "ACCEPT",
+                  "inbound": [
+                    {
+                      "label": "accept-ssh",
+                      "action": "ACCEPT",
+                      "protocol": "TCP",
+                      "ports": "22",
+                      "addresses": {"ipv4": ["0.0.0.0/0"], "ipv6": ["::/0"]}
+                    },
+                    {
+                      "label": "accept-http",
+                      "action": "ACCEPT",
+                      "protocol": "TCP",
+                      "ports": "80",
+                      "addresses": {"ipv4": ["0.0.0.0/0"], "ipv6": ["::/0"]}
+                    },
+                    {
+                      "label": "accept-https",
+                      "action": "ACCEPT",
+                      "protocol": "TCP",
+                      "ports": "443",
+                      "addresses": {"ipv4": ["0.0.0.0/0"], "ipv6": ["::/0"]}
+                    }
+                  ]
+                }
+              }' | jq -r '.id')
+            echo "Firewall created: $FIREWALL_ID"
+          else
+            echo "Firewall already exists: $FIREWALL_ID"
+          fi
+          echo "FIREWALL_ID=$FIREWALL_ID" >> $GITHUB_ENV
 
       - name: Provision VM if not exists
         run: |
           EXISTS=$(curl -s -H "Authorization: Bearer ${{ secrets.LINODE_TOKEN }}" \
             https://api.linode.com/v4/linode/instances | \
-            jq '[.data[] | select(.label=="app-prod-1")] | length')
+            jq '[.data[] | select(.label=="app-1")] | length')
+
           if [ "$EXISTS" -eq 0 ]; then
             echo "Provisioning new VM..."
-            curl -s -H "Authorization: Bearer ${{ secrets.LINODE_TOKEN }}" \
+            LINODE_ID=$(curl -s -H "Authorization: Bearer ${{ secrets.LINODE_TOKEN }}" \
               -H "Content-Type: application/json" \
               -X POST https://api.linode.com/v4/linode/instances \
               -d "{
                 \"image\": \"linode/ubuntu22.04\",
                 \"region\": \"us-east\",
                 \"type\": \"g6-nanode-1\",
-                \"label\": \"app-prod-1\",
+                \"label\": \"app-1\",
                 \"root_pass\": \"${{ secrets.VM_ROOT_PASS }}\",
                 \"private_ip\": true,
                 \"metadata\": {\"user_data\": \"$(base64 -w0 cloud-init.yaml)\"}
-              }"
+              }" | jq -r '.id')
+
+            echo "VM created: $LINODE_ID"
+
+            echo "Assigning firewall to VM..."
+            curl -s -H "Authorization: Bearer ${{ secrets.LINODE_TOKEN }}" \
+              -H "Content-Type: application/json" \
+              -X POST https://api.linode.com/v4/networking/firewalls/${{ env.FIREWALL_ID }}/devices \
+              -d "{\"id\": $LINODE_ID, \"type\": \"linode\"}"
           else
             echo "VM already exists, skipping provision"
           fi
@@ -44,7 +99,7 @@ jobs:
           for i in $(seq 1 24); do
             STATUS=$(curl -s -H "Authorization: Bearer ${{ secrets.LINODE_TOKEN }}" \
               https://api.linode.com/v4/linode/instances | \
-              jq -r '.data[] | select(.label=="app-prod-1") | .status')
+              jq -r '.data[] | select(.label=="app-1") | .status')
             echo "Attempt $i: status=$STATUS"
             if [ "$STATUS" = "running" ]; then
               echo "VM is running"
@@ -62,7 +117,7 @@ jobs:
         run: |
           IP=$(curl -s -H "Authorization: Bearer ${{ secrets.LINODE_TOKEN }}" \
             https://api.linode.com/v4/linode/instances | \
-            jq -r '.data[] | select(.label=="app-prod-1") | .ipv4[0]')
+            jq -r '.data[] | select(.label=="app-1") | .ipv4[0]')
           echo "vm_ip=$IP" >> $GITHUB_OUTPUT
           echo "VM IP: $IP"
           if [ -z "$IP" ]; then
@@ -83,7 +138,15 @@ jobs:
           mkdir -p ~/.ssh
           echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
           chmod 600 ~/.ssh/id_rsa
-          ssh-keyscan -H ${{ needs.provision.outputs.vm_ip }} >> ~/.ssh/known_hosts
+          echo "Waiting for SSH to be ready..."
+          for i in $(seq 1 20); do
+            if ssh-keyscan -H ${{ needs.provision.outputs.vm_ip }} >> ~/.ssh/known_hosts 2>/dev/null; then
+              echo "SSH is ready"
+              break
+            fi
+            echo "Attempt $i: SSH not ready yet..."
+            sleep 15
+          done
 
       - name: Deploy app
         run: |

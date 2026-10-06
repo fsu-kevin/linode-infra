@@ -212,6 +212,7 @@ jobs:
           done
 
       - name: Deploy to each VM
+        id: deploy
         run: |
           VM_IPS='${{ needs.provision.outputs.vm_ips }}'
           VM_LABELS='${{ needs.provision.outputs.vm_labels }}'
@@ -227,6 +228,41 @@ jobs:
             ssh root@$IP "hostnamectl set-hostname $LABEL"
             ssh root@$IP "echo '${{ secrets.VAULT_AGENT_TOKEN }}' > /etc/vault.d/token && chmod 600 /etc/vault.d/token"
             ssh root@$IP "chmod +x /opt/app/deploy/setup-vm.sh && LINODE_TOKEN='${{ secrets.LINODE_TOKEN }}' bash /opt/app/deploy/setup-vm.sh"
+          done
+
+      - name: Upload deploy logs
+        if: always()
+        run: |
+          VM_IPS='${{ needs.provision.outputs.vm_ips }}'
+          VM_LABELS='${{ needs.provision.outputs.vm_labels }}'
+          OUTCOME="${{ steps.deploy.outcome }}"
+          COUNT=$(echo $VM_IPS | jq 'length')
+
+          for idx in $(seq 0 $((COUNT - 1))); do
+            IP=$(echo $VM_IPS | jq -r ".[$idx]")
+            LABEL=$(echo $VM_LABELS | jq -r ".[$idx]")
+
+            if [ "$OUTCOME" = "success" ]; then
+              ARCHIVE="${LABEL}-deploy.tar.gz"
+            else
+              ARCHIVE="${LABEL}-fail-log.tar.gz"
+            fi
+
+            ssh -o ConnectTimeout=10 root@$IP "
+              tar -czf /tmp/$ARCHIVE /tmp/setup-vm.log 2>/dev/null || true
+              export VAULT_ADDR=http://192.168.215.38:8200
+              export VAULT_TOKEN=\$(cat /etc/vault.d/token 2>/dev/null)
+              if [ -z \"\$VAULT_TOKEN\" ]; then echo 'No vault token, skipping log upload'; exit 0; fi
+              KEY=\$(vault kv get -field=object_storage_key secret/linode | tr -d '[:space:]')
+              SECRET=\$(vault kv get -field=object_storage_secret secret/linode | tr -d '[:space:]')
+              BUCKET=\$(vault kv get -field=bucket_name secret/linode | tr -d '[:space:]/')
+              REGION=\$(vault kv get -field=bucket_region secret/linode | tr -d '[:space:]')
+              which aws || apt-get install -q -y awscli
+              AWS_ACCESS_KEY_ID=\$KEY AWS_SECRET_ACCESS_KEY=\$SECRET \
+                aws s3 cp /tmp/$ARCHIVE s3://\$BUCKET/logs/$ARCHIVE \
+                --endpoint-url https://\$REGION.linodeobjects.com
+              echo 'Uploaded: $ARCHIVE'
+            " || echo "Could not upload logs for $LABEL"
           done
 
       - name: Verify

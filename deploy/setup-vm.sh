@@ -1,8 +1,8 @@
 #!/bin/bash
 set -e
 
-# Called by CI after rsync. Expects LINODE_TOKEN env var.
-# VAULT_AGENT_TOKEN already written to /etc/vault.d/token by CI.
+LOG_FILE="/tmp/setup-vm.log"
+exec > >(tee "$LOG_FILE") 2>&1
 
 echo "=== Building backend ==="
 echo "LINODE_TOKEN=$LINODE_TOKEN" > /opt/app/backend/.env
@@ -37,13 +37,18 @@ OBJ_SECRET=$(vault kv get -field=object_storage_secret secret/linode | tr -d '[:
 BUCKET=$(vault kv get -field=bucket_name secret/linode | tr -d '[:space:]/')
 REGION=$(vault kv get -field=bucket_region secret/linode | tr -d '[:space:]')
 echo "Bucket: $BUCKET Region: $REGION"
+
 echo "${OBJ_KEY}:${OBJ_SECRET}" > /root/.passwd-s3fs
 chmod 600 /root/.passwd-s3fs
 mkdir -p /mnt/backup
-mountpoint -q /mnt/backup || s3fs ${BUCKET} /mnt/backup \
+
+# Force remount — stale mounts from previous deploys cause connection aborts
+umount -l /mnt/backup 2>/dev/null || true
+s3fs ${BUCKET} /mnt/backup \
   -o passwd_file=/root/.passwd-s3fs \
   -o url=https://${REGION}.linodeobjects.com \
   -o use_path_request_style
+
 grep -q "s3fs" /etc/fstab || \
   echo "${BUCKET} /mnt/backup fuse.s3fs _netdev,allow_other,use_path_request_style,passwd_file=/root/.passwd-s3fs,url=https://${REGION}.linodeobjects.com 0 0" >> /etc/fstab
 

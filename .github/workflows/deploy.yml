@@ -8,9 +8,12 @@ jobs:
   provision:
     runs-on: ubuntu-latest
     outputs:
-      vm_ip: ${{ steps.get_vm.outputs.vm_ip }}
-      vm_id: ${{ steps.get_vm.outputs.vm_id }}
+      vm_ips: ${{ steps.get_vms.outputs.vm_ips }}
+      vm_private_ips: ${{ steps.get_vms.outputs.vm_private_ips }}
+      vm_labels: ${{ steps.get_vms.outputs.vm_labels }}
       firewall_id: ${{ steps.setup_firewall.outputs.firewall_id }}
+      nb_id: ${{ steps.setup_lb.outputs.nb_id }}
+      nb_config_id: ${{ steps.setup_lb.outputs.nb_config_id }}
 
     steps:
       - name: Checkout
@@ -65,105 +68,140 @@ jobs:
           fi
           echo "firewall_id=$FIREWALL_ID" >> $GITHUB_OUTPUT
 
-      - name: Check for existing app VM
-        id: check_vm
+      - name: Create VMs to reach count of 2
         run: |
           EXISTING=$(curl -s \
             -H "Authorization: Bearer ${{ secrets.LINODE_TOKEN }}" \
             https://api.linode.com/v4/linode/instances | \
             jq '[.data[] | select(.tags != null and (.tags | contains(["linode-automation-app"])) and (.label | startswith("app-")))]')
           COUNT=$(echo $EXISTING | jq 'length')
-          echo "Found $COUNT existing app VM(s)"
-          echo "count=$COUNT" >> $GITHUB_OUTPUT
+          NEEDED=$((2 - COUNT))
+          echo "Existing: $COUNT, creating: $NEEDED"
 
-      - name: Create VM
-        if: steps.check_vm.outputs.count == '0'
+          for i in $(seq 1 $NEEDED); do
+            USERDATA=$(base64 -w0 cloud-init.yaml)
+            RESPONSE=$(curl -s \
+              -H "Authorization: Bearer ${{ secrets.LINODE_TOKEN }}" \
+              -H "Content-Type: application/json" \
+              -X POST https://api.linode.com/v4/linode/instances \
+              -d "{
+                \"image\": \"linode/ubuntu22.04\",
+                \"region\": \"us-east\",
+                \"type\": \"g6-nanode-1\",
+                \"label\": \"app-new-${{ github.run_id }}-$i\",
+                \"tags\": [\"linode-automation-app\"],
+                \"root_pass\": \"${{ secrets.VM_ROOT_PASS }}\",
+                \"authorized_keys\": [\"${{ secrets.SSH_PUBLIC_KEY }}\"],
+                \"private_ip\": true,
+                \"metadata\": {\"user_data\": \"$USERDATA\"}
+              }")
+            echo "Create response: $RESPONSE"
+            LINODE_ID=$(echo $RESPONSE | jq -r '.id')
+            if [ -z "$LINODE_ID" ] || [ "$LINODE_ID" = "null" ]; then
+              echo "VM creation failed"
+              exit 1
+            fi
+            curl -s \
+              -H "Authorization: Bearer ${{ secrets.LINODE_TOKEN }}" \
+              -H "Content-Type: application/json" \
+              -X PUT https://api.linode.com/v4/linode/instances/$LINODE_ID \
+              -d "{\"label\": \"app-$LINODE_ID\"}"
+            curl -s \
+              -H "Authorization: Bearer ${{ secrets.LINODE_TOKEN }}" \
+              -H "Content-Type: application/json" \
+              -X POST https://api.linode.com/v4/networking/firewalls/${{ steps.setup_firewall.outputs.firewall_id }}/devices \
+              -d "{\"id\": $LINODE_ID, \"type\": \"linode\"}"
+            echo "Created: app-$LINODE_ID"
+          done
+
+      - name: Wait for 2 running VMs
         run: |
-          echo "No existing VM found — creating new one..."
-          USERDATA=$(base64 -w0 cloud-init.yaml)
-          RESPONSE=$(curl -s \
-            -H "Authorization: Bearer ${{ secrets.LINODE_TOKEN }}" \
-            -H "Content-Type: application/json" \
-            -X POST https://api.linode.com/v4/linode/instances \
-            -d "{
-              \"image\": \"linode/ubuntu22.04\",
-              \"region\": \"us-east\",
-              \"type\": \"g6-nanode-1\",
-              \"label\": \"app-new-${{ github.run_id }}\",
-              \"tags\": [\"linode-automation-app\"],
-              \"root_pass\": \"${{ secrets.VM_ROOT_PASS }}\",
-              \"authorized_keys\": [\"${{ secrets.SSH_PUBLIC_KEY }}\"],
-              \"private_ip\": true,
-              \"metadata\": {\"user_data\": \"$USERDATA\"}
-            }")
-
-          echo "Create response: $RESPONSE"
-          LINODE_ID=$(echo $RESPONSE | jq -r '.id')
-
-          if [ -z "$LINODE_ID" ] || [ "$LINODE_ID" = "null" ]; then
-            echo "VM creation failed — full response above"
-            exit 1
-          fi
-
-          echo "VM created with ID: $LINODE_ID — renaming to app-$LINODE_ID"
-          curl -s \
-            -H "Authorization: Bearer ${{ secrets.LINODE_TOKEN }}" \
-            -H "Content-Type: application/json" \
-            -X PUT https://api.linode.com/v4/linode/instances/$LINODE_ID \
-            -d "{\"label\": \"app-$LINODE_ID\"}"
-
-          echo "Assigning firewall ${{ steps.setup_firewall.outputs.firewall_id }}..."
-          curl -s \
-            -H "Authorization: Bearer ${{ secrets.LINODE_TOKEN }}" \
-            -H "Content-Type: application/json" \
-            -X POST https://api.linode.com/v4/networking/firewalls/${{ steps.setup_firewall.outputs.firewall_id }}/devices \
-            -d "{\"id\": $LINODE_ID, \"type\": \"linode\"}"
-
-          echo "VM provisioned: app-$LINODE_ID"
-
-      - name: Wait for VM to be running
-        run: |
-          echo "Waiting for VM to reach running state..."
-          STATUS=""
-          for i in $(seq 1 30); do
-            VM=$(curl -s \
+          for i in $(seq 1 40); do
+            COUNT=$(curl -s \
               -H "Authorization: Bearer ${{ secrets.LINODE_TOKEN }}" \
               https://api.linode.com/v4/linode/instances | \
-              jq '.data[] | select(.tags != null and (.tags | contains(["linode-automation-app"])) and (.label | startswith("app-")))')
-            STATUS=$(echo $VM | jq -r '.status')
-            LABEL=$(echo $VM | jq -r '.label')
-            echo "Attempt $i: $LABEL status=$STATUS"
-            if [ "$STATUS" = "running" ]; then
-              echo "VM is running"
+              jq '[.data[] | select(.tags != null and (.tags | contains(["linode-automation-app"])) and (.label | startswith("app-")) and .status == "running")] | length')
+            echo "Attempt $i: $COUNT running"
+            if [ "$COUNT" -ge 2 ]; then
+              echo "Both VMs running"
               break
             fi
             sleep 15
           done
-          if [ "$STATUS" != "running" ]; then
-            echo "VM did not reach running state after 7.5 minutes"
+          if [ "$COUNT" -lt 2 ]; then
+            echo "Timed out waiting for VMs"
             exit 1
           fi
 
       - name: Get VM details
-        id: get_vm
+        id: get_vms
         run: |
-          VM=$(curl -s \
+          VMS=$(curl -s \
             -H "Authorization: Bearer ${{ secrets.LINODE_TOKEN }}" \
             https://api.linode.com/v4/linode/instances | \
-            jq '.data[] | select(.tags != null and (.tags | contains(["linode-automation-app"])) and (.label | startswith("app-")))')
+            jq '[.data[] | select(.tags != null and (.tags | contains(["linode-automation-app"])) and (.label | startswith("app-")))]')
 
-          IP=$(echo $VM | jq -r '.ipv4[0]')
-          VM_ID=$(echo $VM | jq -r '.id')
-          LABEL=$(echo $VM | jq -r '.label')
+          VM_IPS=$(echo $VMS | jq -c '[.[].ipv4 | map(select(startswith("192.168.") | not)) | .[0]]')
+          VM_PRIVATE_IPS=$(echo $VMS | jq -c '[.[].ipv4 | map(select(startswith("192.168."))) | .[0]]')
+          VM_LABELS=$(echo $VMS | jq -c '[.[].label]')
 
-          echo "vm_ip=$IP" >> $GITHUB_OUTPUT
-          echo "vm_id=$VM_ID" >> $GITHUB_OUTPUT
-          echo "VM: $LABEL | ID: $VM_ID | IP: $IP"
+          echo "vm_ips=$VM_IPS" >> $GITHUB_OUTPUT
+          echo "vm_private_ips=$VM_PRIVATE_IPS" >> $GITHUB_OUTPUT
+          echo "vm_labels=$VM_LABELS" >> $GITHUB_OUTPUT
+          echo "Labels: $VM_LABELS | Public: $VM_IPS | Private: $VM_PRIVATE_IPS"
 
-          if [ -z "$IP" ] || [ "$IP" = "null" ]; then
-            echo "Failed to get VM IP"
-            exit 1
+      - name: Setup NodeBalancer
+        id: setup_lb
+        run: |
+          NB_ID=$(curl -s \
+            -H "Authorization: Bearer ${{ secrets.LINODE_TOKEN }}" \
+            https://api.linode.com/v4/nodebalancers | \
+            jq -r '.data[] | select(.label=="linode-automation-app-lb") | .id')
+
+          if [ -z "$NB_ID" ] || [ "$NB_ID" = "null" ]; then
+            echo "Creating NodeBalancer..."
+            RESPONSE=$(curl -s \
+              -H "Authorization: Bearer ${{ secrets.LINODE_TOKEN }}" \
+              -H "Content-Type: application/json" \
+              -X POST https://api.linode.com/v4/nodebalancers \
+              -d '{"label": "linode-automation-app-lb", "region": "us-east"}')
+            echo "NodeBalancer response: $RESPONSE"
+            NB_ID=$(echo $RESPONSE | jq -r '.id')
+            if [ -z "$NB_ID" ] || [ "$NB_ID" = "null" ]; then
+              echo "Failed to create NodeBalancer"
+              exit 1
+            fi
           fi
+          echo "NodeBalancer: $NB_ID"
+
+          CONFIG_ID=$(curl -s \
+            -H "Authorization: Bearer ${{ secrets.LINODE_TOKEN }}" \
+            https://api.linode.com/v4/nodebalancers/$NB_ID/configs | \
+            jq -r '.data[] | select(.port==80) | .id')
+
+          if [ -z "$CONFIG_ID" ] || [ "$CONFIG_ID" = "null" ]; then
+            echo "Creating HTTP config..."
+            RESPONSE=$(curl -s \
+              -H "Authorization: Bearer ${{ secrets.LINODE_TOKEN }}" \
+              -H "Content-Type: application/json" \
+              -X POST https://api.linode.com/v4/nodebalancers/$NB_ID/configs \
+              -d '{
+                "port": 80,
+                "protocol": "http",
+                "algorithm": "roundrobin",
+                "check": "http",
+                "check_path": "/",
+                "check_interval": 10,
+                "check_timeout": 5,
+                "check_attempts": 3
+              }')
+            echo "Config response: $RESPONSE"
+            CONFIG_ID=$(echo $RESPONSE | jq -r '.id')
+          fi
+          echo "Config: $CONFIG_ID"
+
+          echo "nb_id=$NB_ID" >> $GITHUB_OUTPUT
+          echo "nb_config_id=$CONFIG_ID" >> $GITHUB_OUTPUT
 
   deploy:
     runs-on: ubuntu-latest
@@ -177,12 +215,10 @@ jobs:
         run: |
           RUNNER_IP=$(curl -s https://api.ipify.org)
           echo "Runner IP: $RUNNER_IP"
-          echo "Firewall ID: ${{ needs.provision.outputs.firewall_id }}"
 
           CURRENT_RULES=$(curl -s \
             -H "Authorization: Bearer ${{ secrets.LINODE_TOKEN }}" \
             https://api.linode.com/v4/networking/firewalls/${{ needs.provision.outputs.firewall_id }}/rules)
-          echo "Current rules: $CURRENT_RULES"
 
           BODY=$(echo $CURRENT_RULES | jq --arg ip "$RUNNER_IP/32" '{
             inbound_policy: "DROP",
@@ -202,135 +238,161 @@ jobs:
             -H "Content-Type: application/json" \
             -X PUT https://api.linode.com/v4/networking/firewalls/${{ needs.provision.outputs.firewall_id }}/rules \
             -d "$BODY")
-          echo "Firewall update response: $RESPONSE"
-
+          echo "Firewall update: $RESPONSE"
           if echo $RESPONSE | jq -e '.errors' > /dev/null 2>&1; then
-            echo "Failed to update firewall rules"
+            echo "Failed to update firewall"
             exit 1
           fi
-          echo "SSH temporarily allowed from $RUNNER_IP"
+          echo "SSH allowed from $RUNNER_IP"
 
       - name: Setup SSH
         run: |
           mkdir -p ~/.ssh
           printf '%s\n' "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
           chmod 600 ~/.ssh/id_rsa
-          ssh-keygen -y -f ~/.ssh/id_rsa > /dev/null && echo "Private key is valid" || { echo "Private key is INVALID"; exit 1; }
-          echo "Waiting for SSH to be ready on ${{ needs.provision.outputs.vm_ip }}..."
-          for i in $(seq 1 20); do
-            if ssh-keyscan -H ${{ needs.provision.outputs.vm_ip }} >> ~/.ssh/known_hosts 2>/dev/null; then
-              echo "SSH is ready"
-              break
-            fi
-            echo "Attempt $i: not ready yet..."
-            sleep 15
+          ssh-keygen -y -f ~/.ssh/id_rsa > /dev/null && echo "Key valid" || { echo "Key INVALID"; exit 1; }
+
+          for IP in $(echo '${{ needs.provision.outputs.vm_ips }}' | jq -r '.[]'); do
+            echo "Waiting for SSH on $IP..."
+            for i in $(seq 1 20); do
+              if ssh-keyscan -H $IP >> ~/.ssh/known_hosts 2>/dev/null; then
+                echo "SSH ready: $IP"
+                break
+              fi
+              sleep 15
+            done
           done
 
-      - name: Wait for cloud-init
+      - name: Deploy to each VM
         run: |
-          ssh root@${{ needs.provision.outputs.vm_ip }} "cloud-init status --wait && echo 'cloud-init done'"
+          VM_IPS='${{ needs.provision.outputs.vm_ips }}'
+          VM_LABELS='${{ needs.provision.outputs.vm_labels }}'
+          COUNT=$(echo $VM_IPS | jq 'length')
 
-      - name: Deploy app
+          for idx in $(seq 0 $((COUNT - 1))); do
+            IP=$(echo $VM_IPS | jq -r ".[$idx]")
+            LABEL=$(echo $VM_LABELS | jq -r ".[$idx]")
+            echo "=== Deploying to $LABEL ($IP) ==="
+
+            ssh root@$IP "cloud-init status --wait && echo cloud-init done"
+            rsync -avz --exclude 'node_modules' --exclude '.git' ./ root@$IP:/opt/app/
+            ssh root@$IP "hostnamectl set-hostname $LABEL"
+
+            ssh root@$IP << 'EOF'
+              echo "LINODE_TOKEN=${{ secrets.LINODE_TOKEN }}" > /opt/app/backend/.env
+              echo "PORT=3001" >> /opt/app/backend/.env
+
+              cd /opt/app/backend && npm install && npm run build
+              cd /opt/app/frontend && npm install && npm run build
+
+              printf 'server {\n    listen 80;\n    server_name _;\n\n    root /opt/app/frontend/dist;\n    index index.html;\n\n    location / {\n        try_files $uri $uri/ /index.html;\n    }\n\n    location /api {\n        proxy_pass http://localhost:3001;\n        proxy_http_version 1.1;\n        proxy_set_header Host $host;\n        proxy_set_header X-Real-IP $remote_addr;\n    }\n}\n' > /etc/nginx/sites-available/app
+              nginx -t && systemctl reload nginx
+
+              pm2 delete backend 2>/dev/null || true
+              pm2 start /opt/app/backend/dist/index.js --name "backend"
+              pm2 save
+
+              cp /opt/app/alloy/config.alloy /etc/alloy/config.alloy
+              cp /opt/app/vault/agent.hcl /etc/vault.d/agent.hcl
+              echo "${{ secrets.VAULT_AGENT_TOKEN }}" > /etc/vault.d/token
+              chmod 600 /etc/vault.d/token
+
+              printf '[Unit]\nDescription=Vault Agent\nAfter=network.target\n\n[Service]\nEnvironment=VAULT_ADDR=http://192.168.215.38:8200\nExecStart=/usr/bin/vault agent -config=/etc/vault.d/agent.hcl\nRestart=always\nRestartSec=5\n\n[Install]\nWantedBy=multi-user.target\n' > /etc/systemd/system/vault-agent.service
+              systemctl daemon-reload
+              systemctl enable vault-agent
+              systemctl restart vault-agent
+
+              export VAULT_ADDR="http://192.168.215.38:8200"
+              export VAULT_TOKEN=$(cat /etc/vault.d/token)
+              OBJ_KEY=$(vault kv get -field=object_storage_key secret/linode | tr -d '[:space:]')
+              OBJ_SECRET=$(vault kv get -field=object_storage_secret secret/linode | tr -d '[:space:]')
+              BUCKET=$(vault kv get -field=bucket_name secret/linode | tr -d '[:space:]/')
+              REGION=$(vault kv get -field=bucket_region secret/linode | tr -d '[:space:]')
+              echo "Mounting: $BUCKET ($REGION)"
+              echo "${OBJ_KEY}:${OBJ_SECRET}" > /root/.passwd-s3fs
+              chmod 600 /root/.passwd-s3fs
+              mkdir -p /mnt/backup
+              mountpoint -q /mnt/backup || s3fs ${BUCKET} /mnt/backup \
+                -o passwd_file=/root/.passwd-s3fs \
+                -o url=https://${REGION}.linodeobjects.com \
+                -o use_path_request_style
+              grep -q "s3fs" /etc/fstab || \
+                echo "${BUCKET} /mnt/backup fuse.s3fs _netdev,allow_other,use_path_request_style,passwd_file=/root/.passwd-s3fs,url=https://${REGION}.linodeobjects.com 0 0" >> /etc/fstab
+              mkdir -p /mnt/backup/configs
+              cp /etc/alloy/config.alloy /mnt/backup/configs/
+              cp /etc/vault.d/agent.hcl /mnt/backup/configs/
+EOF
+          done
+
+      - name: Register NodeBalancer backends
         run: |
-          rsync -avz --exclude 'node_modules' --exclude '.git' \
-            ./ root@${{ needs.provision.outputs.vm_ip }}:/opt/app/
+          VM_PRIVATE_IPS='${{ needs.provision.outputs.vm_private_ips }}'
+          VM_LABELS='${{ needs.provision.outputs.vm_labels }}'
+          NB_ID=${{ needs.provision.outputs.nb_id }}
+          CONFIG_ID=${{ needs.provision.outputs.nb_config_id }}
 
-      - name: Build and start app
+          echo "Clearing existing backends..."
+          EXISTING=$(curl -s \
+            -H "Authorization: Bearer ${{ secrets.LINODE_TOKEN }}" \
+            https://api.linode.com/v4/nodebalancers/$NB_ID/configs/$CONFIG_ID/nodes)
+          for NODE_ID in $(echo $EXISTING | jq -r '.data[].id'); do
+            curl -s -X DELETE \
+              -H "Authorization: Bearer ${{ secrets.LINODE_TOKEN }}" \
+              https://api.linode.com/v4/nodebalancers/$NB_ID/configs/$CONFIG_ID/nodes/$NODE_ID
+          done
+
+          COUNT=$(echo $VM_PRIVATE_IPS | jq 'length')
+          for idx in $(seq 0 $((COUNT - 1))); do
+            PRIVATE_IP=$(echo $VM_PRIVATE_IPS | jq -r ".[$idx]")
+            LABEL=$(echo $VM_LABELS | jq -r ".[$idx]")
+            echo "Registering $LABEL ($PRIVATE_IP:80)..."
+            RESPONSE=$(curl -s \
+              -H "Authorization: Bearer ${{ secrets.LINODE_TOKEN }}" \
+              -H "Content-Type: application/json" \
+              -X POST https://api.linode.com/v4/nodebalancers/$NB_ID/configs/$CONFIG_ID/nodes \
+              -d "{\"address\": \"$PRIVATE_IP:80\", \"label\": \"$LABEL\", \"weight\": 100, \"mode\": \"accept\"}")
+            echo "Backend response: $RESPONSE"
+          done
+
+      - name: Verify
         run: |
-          ssh root@${{ needs.provision.outputs.vm_ip }} << 'EOF'
-            # Write backend env (LINODE_TOKEN needed for API proxy calls)
-            echo "LINODE_TOKEN=${{ secrets.LINODE_TOKEN }}" > /opt/app/backend/.env
-            echo "PORT=3001" >> /opt/app/backend/.env
+          VM_IPS='${{ needs.provision.outputs.vm_ips }}'
+          VM_LABELS='${{ needs.provision.outputs.vm_labels }}'
+          COUNT=$(echo $VM_IPS | jq 'length')
 
-            # Build backend
-            cd /opt/app/backend
-            npm install
-            npm run build
+          for idx in $(seq 0 $((COUNT - 1))); do
+            IP=$(echo $VM_IPS | jq -r ".[$idx]")
+            LABEL=$(echo $VM_LABELS | jq -r ".[$idx]")
+            echo "=== $LABEL ($IP) ==="
+            ssh root@$IP << 'EOF'
+              echo "hostname: $(hostname)"
+              echo "--- PM2 ---"
+              pm2 status
+              echo "--- backend logs ---"
+              pm2 logs backend --lines 10 --nostream
+              echo "--- vault-agent ---"
+              systemctl is-active vault-agent
+              echo "--- alloy ---"
+              curl -s http://localhost:12345/-/healthy || echo "not responding"
+              echo "--- nginx ---"
+              systemctl is-active nginx
+              echo "--- object storage ---"
+              df -h | grep backup || echo "not mounted"
+EOF
+          done
 
-            # Build frontend
-            cd /opt/app/frontend
-            npm install
-            npm run build
+          echo "=== NodeBalancer backends ==="
+          curl -s \
+            -H "Authorization: Bearer ${{ secrets.LINODE_TOKEN }}" \
+            https://api.linode.com/v4/nodebalancers/${{ needs.provision.outputs.nb_id }}/configs/${{ needs.provision.outputs.nb_config_id }}/nodes | \
+            jq '.data[] | {label, address, status}'
 
-            # Update nginx to serve static frontend and proxy /api to backend
-            printf 'server {\n    listen 80;\n    server_name _;\n\n    root /opt/app/frontend/dist;\n    index index.html;\n\n    location / {\n        try_files $uri $uri/ /index.html;\n    }\n\n    location /api {\n        proxy_pass http://localhost:3001;\n        proxy_http_version 1.1;\n        proxy_set_header Host $host;\n        proxy_set_header X-Real-IP $remote_addr;\n    }\n}\n' > /etc/nginx/sites-available/app
-            nginx -t && systemctl reload nginx
-
-            # Start backend with pm2
-            pm2 delete backend 2>/dev/null || true
-            pm2 start /opt/app/backend/dist/index.js --name "backend"
-            pm2 save
-          EOF
-
-      - name: Push configs to VM
-        run: |
-          ssh root@${{ needs.provision.outputs.vm_ip }} << 'EOF'
-            cp /opt/app/alloy/config.alloy /etc/alloy/config.alloy
-            cp /opt/app/vault/agent.hcl /etc/vault.d/agent.hcl
-          EOF
-
-      - name: Write Vault Agent token
-        run: |
-          ssh root@${{ needs.provision.outputs.vm_ip }} \
-            "echo '${{ secrets.VAULT_AGENT_TOKEN }}' > /etc/vault.d/token && chmod 600 /etc/vault.d/token"
-
-      - name: Setup Vault Agent service
-        run: |
-          ssh root@${{ needs.provision.outputs.vm_ip }} << 'EOF'
-            printf '[Unit]\nDescription=Vault Agent\nAfter=network.target\n\n[Service]\nEnvironment=VAULT_ADDR=http://192.168.215.38:8200\nExecStart=/usr/bin/vault agent -config=/etc/vault.d/agent.hcl\nRestart=always\nRestartSec=5\n\n[Install]\nWantedBy=multi-user.target\n' > /etc/systemd/system/vault-agent.service
-            systemctl daemon-reload
-            systemctl enable vault-agent
-            systemctl restart vault-agent
-          EOF
-
-      - name: Mount object storage
-        run: |
-          ssh root@${{ needs.provision.outputs.vm_ip }} << 'EOF'
-            export VAULT_ADDR="http://192.168.215.38:8200"
-            export VAULT_TOKEN=$(cat /etc/vault.d/token)
-            OBJ_KEY=$(vault kv get -field=object_storage_key secret/linode | tr -d '[:space:]')
-            OBJ_SECRET=$(vault kv get -field=object_storage_secret secret/linode | tr -d '[:space:]')
-            BUCKET=$(vault kv get -field=bucket_name secret/linode | tr -d '[:space:]/')
-            REGION=$(vault kv get -field=bucket_region secret/linode | tr -d '[:space:]')
-            echo "Mounting bucket: $BUCKET in region: $REGION"
-
-            echo "${OBJ_KEY}:${OBJ_SECRET}" > /root/.passwd-s3fs
-            chmod 600 /root/.passwd-s3fs
-            mkdir -p /mnt/backup
-            mountpoint -q /mnt/backup || s3fs ${BUCKET} /mnt/backup \
-              -o passwd_file=/root/.passwd-s3fs \
-              -o url=https://${REGION}.linodeobjects.com \
-              -o use_path_request_style
-
-            grep -q "s3fs" /etc/fstab || \
-              echo "${BUCKET} /mnt/backup fuse.s3fs _netdev,allow_other,use_path_request_style,passwd_file=/root/.passwd-s3fs,url=https://${REGION}.linodeobjects.com 0 0" >> /etc/fstab
-          EOF
-
-      - name: Backup configs to object storage
-        run: |
-          ssh root@${{ needs.provision.outputs.vm_ip }} << 'EOF'
-            mkdir -p /mnt/backup/configs
-            cp /etc/alloy/config.alloy /mnt/backup/configs/
-            cp /etc/vault.d/agent.hcl /mnt/backup/configs/
-          EOF
-
-      - name: Verify deployment
-        run: |
-          ssh root@${{ needs.provision.outputs.vm_ip }} << 'EOF'
-            echo "=== PM2 ==="
-            pm2 status
-            pm2 logs backend --lines 20 --nostream
-            echo "=== App response ==="
-            curl -s http://localhost:3001/ || echo "backend not responding"
-            echo "=== Vault Agent ==="
-            systemctl is-active vault-agent
-            echo "=== Alloy health ==="
-            curl -s http://localhost:12345/-/healthy || echo "alloy not responding"
-            echo "=== nginx ==="
-            systemctl is-active nginx
-            echo "=== Object storage ==="
-            df -h | grep backup || echo "not mounted"
-          EOF
+          NB_IP=$(curl -s \
+            -H "Authorization: Bearer ${{ secrets.LINODE_TOKEN }}" \
+            https://api.linode.com/v4/nodebalancers/${{ needs.provision.outputs.nb_id }} | \
+            jq -r '.ipv4')
+          echo "NodeBalancer IP: $NB_IP"
+          curl -s -o /dev/null -w "NodeBalancer HTTP status: %{http_code}\n" http://$NB_IP/
 
       - name: Remove SSH runner access
         if: always()

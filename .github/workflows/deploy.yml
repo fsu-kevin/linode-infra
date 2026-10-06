@@ -9,11 +9,8 @@ jobs:
     runs-on: ubuntu-latest
     outputs:
       vm_ips: ${{ steps.get_vms.outputs.vm_ips }}
-      vm_private_ips: ${{ steps.get_vms.outputs.vm_private_ips }}
       vm_labels: ${{ steps.get_vms.outputs.vm_labels }}
       firewall_id: ${{ steps.setup_firewall.outputs.firewall_id }}
-      nb_id: ${{ steps.setup_lb.outputs.nb_id }}
-      nb_config_id: ${{ steps.setup_lb.outputs.nb_config_id }}
 
     steps:
       - name: Checkout
@@ -148,66 +145,11 @@ jobs:
             jq '[.data[] | select(.tags != null and (.tags | contains(["linode-automation-app"])) and (.label | startswith("app-")))]')
 
           VM_IPS=$(echo $VMS | jq -c '[.[].ipv4 | map(select(startswith("192.168.") | not)) | .[0]]')
-          VM_PRIVATE_IPS=$(echo $VMS | jq -c '[.[].ipv4 | map(select(startswith("192.168."))) | .[0]]')
           VM_LABELS=$(echo $VMS | jq -c '[.[].label]')
 
           echo "vm_ips=$VM_IPS" >> $GITHUB_OUTPUT
-          echo "vm_private_ips=$VM_PRIVATE_IPS" >> $GITHUB_OUTPUT
           echo "vm_labels=$VM_LABELS" >> $GITHUB_OUTPUT
-          echo "Labels: $VM_LABELS | Public: $VM_IPS | Private: $VM_PRIVATE_IPS"
-
-      - name: Setup NodeBalancer
-        id: setup_lb
-        run: |
-          NB_ID=$(curl -s \
-            -H "Authorization: Bearer ${{ secrets.LINODE_TOKEN }}" \
-            https://api.linode.com/v4/nodebalancers | \
-            jq -r '.data[] | select(.label=="linode-automation-app-lb") | .id')
-
-          if [ -z "$NB_ID" ] || [ "$NB_ID" = "null" ]; then
-            echo "Creating NodeBalancer..."
-            RESPONSE=$(curl -s \
-              -H "Authorization: Bearer ${{ secrets.LINODE_TOKEN }}" \
-              -H "Content-Type: application/json" \
-              -X POST https://api.linode.com/v4/nodebalancers \
-              -d '{"label": "linode-automation-app-lb", "region": "us-east"}')
-            echo "NodeBalancer response: $RESPONSE"
-            NB_ID=$(echo $RESPONSE | jq -r '.id')
-            if [ -z "$NB_ID" ] || [ "$NB_ID" = "null" ]; then
-              echo "Failed to create NodeBalancer"
-              exit 1
-            fi
-          fi
-          echo "NodeBalancer: $NB_ID"
-
-          CONFIG_ID=$(curl -s \
-            -H "Authorization: Bearer ${{ secrets.LINODE_TOKEN }}" \
-            https://api.linode.com/v4/nodebalancers/$NB_ID/configs | \
-            jq -r '.data[] | select(.port==80) | .id')
-
-          if [ -z "$CONFIG_ID" ] || [ "$CONFIG_ID" = "null" ]; then
-            echo "Creating HTTP config..."
-            RESPONSE=$(curl -s \
-              -H "Authorization: Bearer ${{ secrets.LINODE_TOKEN }}" \
-              -H "Content-Type: application/json" \
-              -X POST https://api.linode.com/v4/nodebalancers/$NB_ID/configs \
-              -d '{
-                "port": 80,
-                "protocol": "http",
-                "algorithm": "roundrobin",
-                "check": "http",
-                "check_path": "/",
-                "check_interval": 10,
-                "check_timeout": 5,
-                "check_attempts": 3
-              }')
-            echo "Config response: $RESPONSE"
-            CONFIG_ID=$(echo $RESPONSE | jq -r '.id')
-          fi
-          echo "Config: $CONFIG_ID"
-
-          echo "nb_id=$NB_ID" >> $GITHUB_OUTPUT
-          echo "nb_config_id=$CONFIG_ID" >> $GITHUB_OUTPUT
+          echo "Labels: $VM_LABELS | Public: $VM_IPS"
 
   deploy:
     runs-on: ubuntu-latest
@@ -287,36 +229,6 @@ jobs:
             ssh root@$IP "chmod +x /opt/app/deploy/setup-vm.sh && LINODE_TOKEN='${{ secrets.LINODE_TOKEN }}' bash /opt/app/deploy/setup-vm.sh"
           done
 
-      - name: Register NodeBalancer backends
-        run: |
-          VM_PRIVATE_IPS='${{ needs.provision.outputs.vm_private_ips }}'
-          VM_LABELS='${{ needs.provision.outputs.vm_labels }}'
-          NB_ID=${{ needs.provision.outputs.nb_id }}
-          CONFIG_ID=${{ needs.provision.outputs.nb_config_id }}
-
-          echo "Clearing existing backends..."
-          EXISTING=$(curl -s \
-            -H "Authorization: Bearer ${{ secrets.LINODE_TOKEN }}" \
-            https://api.linode.com/v4/nodebalancers/$NB_ID/configs/$CONFIG_ID/nodes)
-          for NODE_ID in $(echo $EXISTING | jq -r '.data[].id'); do
-            curl -s -X DELETE \
-              -H "Authorization: Bearer ${{ secrets.LINODE_TOKEN }}" \
-              https://api.linode.com/v4/nodebalancers/$NB_ID/configs/$CONFIG_ID/nodes/$NODE_ID
-          done
-
-          COUNT=$(echo $VM_PRIVATE_IPS | jq 'length')
-          for idx in $(seq 0 $((COUNT - 1))); do
-            PRIVATE_IP=$(echo $VM_PRIVATE_IPS | jq -r ".[$idx]")
-            LABEL=$(echo $VM_LABELS | jq -r ".[$idx]")
-            echo "Registering $LABEL ($PRIVATE_IP:80)..."
-            RESPONSE=$(curl -s \
-              -H "Authorization: Bearer ${{ secrets.LINODE_TOKEN }}" \
-              -H "Content-Type: application/json" \
-              -X POST https://api.linode.com/v4/nodebalancers/$NB_ID/configs/$CONFIG_ID/nodes \
-              -d "{\"address\": \"$PRIVATE_IP:80\", \"label\": \"$LABEL\", \"weight\": 100, \"mode\": \"accept\"}")
-            echo "Backend response: $RESPONSE"
-          done
-
       - name: Verify
         run: |
           VM_IPS='${{ needs.provision.outputs.vm_ips }}'
@@ -329,19 +241,6 @@ jobs:
             echo "=== $LABEL ($IP) ==="
             ssh root@$IP "hostname && pm2 status && pm2 logs backend --lines 10 --nostream && systemctl is-active vault-agent && curl -s http://localhost:12345/-/healthy || true && systemctl is-active nginx && df -h | grep backup || echo not-mounted"
           done
-
-          echo "=== NodeBalancer backends ==="
-          curl -s \
-            -H "Authorization: Bearer ${{ secrets.LINODE_TOKEN }}" \
-            https://api.linode.com/v4/nodebalancers/${{ needs.provision.outputs.nb_id }}/configs/${{ needs.provision.outputs.nb_config_id }}/nodes | \
-            jq '.data[] | {label, address, status}'
-
-          NB_IP=$(curl -s \
-            -H "Authorization: Bearer ${{ secrets.LINODE_TOKEN }}" \
-            https://api.linode.com/v4/nodebalancers/${{ needs.provision.outputs.nb_id }} | \
-            jq -r '.ipv4')
-          echo "NodeBalancer IP: $NB_IP"
-          curl -s -o /dev/null -w "NodeBalancer HTTP status: %{http_code}\n" http://$NB_IP/
 
       - name: Remove SSH runner access
         if: always()

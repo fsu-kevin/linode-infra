@@ -235,12 +235,49 @@ jobs:
           rsync -avz --exclude 'node_modules' --exclude '.git' \
             ./ root@${{ needs.provision.outputs.vm_ip }}:/opt/app/
 
-      - name: Install dependencies and start app
+      - name: Build and start app
         run: |
           ssh root@${{ needs.provision.outputs.vm_ip }} << 'EOF'
-            cd /opt/app
+            # Write backend env (LINODE_TOKEN needed for API proxy calls)
+            echo "LINODE_TOKEN=${{ secrets.LINODE_TOKEN }}" > /opt/app/backend/.env
+            echo "PORT=3001" >> /opt/app/backend/.env
+
+            # Build backend
+            cd /opt/app/backend
             npm install
-            pm2 restart app || pm2 start npm --name "app" -- start
+            npm run build
+
+            # Build frontend
+            cd /opt/app/frontend
+            npm install
+            npm run build
+
+            # Update nginx to serve static frontend and proxy /api to backend
+            cat > /etc/nginx/sites-available/app << 'NGINXEOF'
+server {
+    listen 80;
+    server_name _;
+
+    root /opt/app/frontend/dist;
+    index index.html;
+
+    location / {
+        try_files $uri $uri/ /index.html;
+    }
+
+    location /api {
+        proxy_pass http://localhost:3001;
+        proxy_http_version 1.1;
+        proxy_set_header Host $host;
+        proxy_set_header X-Real-IP $remote_addr;
+    }
+}
+NGINXEOF
+            nginx -t && systemctl reload nginx
+
+            # Start backend with pm2
+            pm2 delete backend 2>/dev/null || true
+            pm2 start /opt/app/backend/dist/index.js --name "backend"
             pm2 save
           EOF
 
@@ -270,10 +307,11 @@ jobs:
           ssh root@${{ needs.provision.outputs.vm_ip }} << 'EOF'
             export VAULT_ADDR="http://192.168.215.38:8200"
             export VAULT_TOKEN=$(cat /etc/vault.d/token)
-            OBJ_KEY=$(vault kv get -field=object_storage_key secret/linode)
-            OBJ_SECRET=$(vault kv get -field=object_storage_secret secret/linode)
-            BUCKET=$(vault kv get -field=bucket_name secret/linode)
-            REGION=$(vault kv get -field=bucket_region secret/linode)
+            OBJ_KEY=$(vault kv get -field=object_storage_key secret/linode | tr -d '[:space:]')
+            OBJ_SECRET=$(vault kv get -field=object_storage_secret secret/linode | tr -d '[:space:]')
+            BUCKET=$(vault kv get -field=bucket_name secret/linode | tr -d '[:space:]/')
+            REGION=$(vault kv get -field=bucket_region secret/linode | tr -d '[:space:]')
+            echo "Mounting bucket: $BUCKET in region: $REGION"
 
             echo "${OBJ_KEY}:${OBJ_SECRET}" > /root/.passwd-s3fs
             chmod 600 /root/.passwd-s3fs
@@ -300,10 +338,13 @@ jobs:
           ssh root@${{ needs.provision.outputs.vm_ip }} << 'EOF'
             echo "=== PM2 ==="
             pm2 status
+            pm2 logs backend --lines 20 --nostream
+            echo "=== App response ==="
+            curl -s http://localhost:3001/ || echo "backend not responding"
             echo "=== Vault Agent ==="
             systemctl is-active vault-agent
             echo "=== Alloy health ==="
-            curl -s http://localhost:12345/-/healthy
+            curl -s http://localhost:12345/-/healthy || echo "alloy not responding"
             echo "=== nginx ==="
             systemctl is-active nginx
             echo "=== Object storage ==="

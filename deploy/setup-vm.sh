@@ -27,7 +27,8 @@ pm2 save
 echo "=== Configuring Vault Agent ==="
 cp /opt/app/alloy/config.alloy /etc/alloy/config.alloy
 cp /opt/app/vault/agent.hcl /etc/vault.d/agent.hcl
-printf '[Unit]\nDescription=Vault Agent\nAfter=network.target\n\n[Service]\nEnvironment=VAULT_ADDR=http://192.168.215.38:8200\nExecStart=/usr/bin/vault agent -config=/etc/vault.d/agent.hcl\nRestart=always\nRestartSec=5\n\n[Install]\nWantedBy=multi-user.target\n' > /etc/systemd/system/vault-agent.service
+printf '[Unit]\nDescription=Vault Agent\nAfter=network.target\n\n[Service]\nEnvironment=VAULT_ADDR=http://192.168.215.38:8200\nExecStart=/usr/bin/vault agent -config=/etc/vault.d/agent.hcl\nRestart=always\nRestartSec=5\nStandardOutput=append:/var/log/vault-agent.log\nStandardError=append:/var/log/vault-agent.log\n\n[Install]\nWantedBy=multi-user.target\n' > /etc/systemd/system/vault-agent.service
+touch /var/log/vault-agent.log
 systemctl daemon-reload
 systemctl enable vault-agent
 systemctl restart vault-agent
@@ -40,6 +41,8 @@ OBJ_SECRET=$(vault kv get -field=object_storage_secret secret/linode | tr -d '[:
 BUCKET=$(vault kv get -field=bucket_name secret/linode | tr -d '[:space:]/')
 REGION=$(vault kv get -field=bucket_region secret/linode | tr -d '[:space:]')
 echo "Bucket: $BUCKET Region: $REGION"
+touch /var/log/object-storage.log
+log_storage() { echo "$(date -u +%Y-%m-%dT%H:%M:%SZ) $*" >> /var/log/object-storage.log; }
 
 printf '%s:%s\n' "$OBJ_KEY" "$OBJ_SECRET" > /root/.passwd-s3fs
 chmod 600 /root/.passwd-s3fs
@@ -47,6 +50,7 @@ mkdir -p /mnt/backup
 
 # Force remount
 umount -l /mnt/backup 2>/dev/null || true
+log_storage "MOUNT_ATTEMPT bucket=$BUCKET region=$REGION"
 s3fs ${BUCKET} /mnt/backup \
   -o passwd_file=/root/.passwd-s3fs \
   -o url=https://${REGION}.linodeobjects.com \
@@ -56,16 +60,18 @@ s3fs ${BUCKET} /mnt/backup \
 
 # Verify mount is functional before using it
 if ls /mnt/backup/ > /dev/null 2>&1; then
+  log_storage "MOUNT_SUCCESS bucket=$BUCKET"
   grep -q "s3fs" /etc/fstab || \
     echo "${BUCKET} /mnt/backup fuse.s3fs _netdev,allow_other,use_path_request_style,passwd_file=/root/.passwd-s3fs,url=https://${REGION}.linodeobjects.com 0 0" >> /etc/fstab
   echo "=== Backing up configs ==="
   mkdir -p /mnt/backup/configs
   cp /etc/alloy/config.alloy /mnt/backup/configs/
   cp /etc/vault.d/agent.hcl /mnt/backup/configs/
+  log_storage "UPLOAD_SUCCESS path=configs/alloy+vault"
   echo "Configs backed up to bucket"
 else
+  log_storage "MOUNT_FAILED bucket=$BUCKET error=see_s3fs_log"
   echo "WARNING: s3fs mount not functional, skipping config backup"
-  echo "=== s3fs error log ==="
   cat /tmp/s3fs.log || true
   umount -l /mnt/backup 2>/dev/null || true
 fi

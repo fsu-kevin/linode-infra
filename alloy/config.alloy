@@ -61,6 +61,68 @@ loki.source.file "nginx_logs" {
   forward_to = [loki.write.grafanacloud.receiver]
 }
 
+// Access logs — visitor traffic and application login events
+loki.source.file "access_application_nginx" {
+  targets = [{
+    __path__ = "/var/log/nginx/access.log",
+    instance = constants.hostname,
+    job      = "access_application",
+    type     = "visitor",
+  }]
+  forward_to = [loki.write.grafanacloud.receiver]
+}
+
+loki.source.file "access_application_app" {
+  targets = [{
+    __path__ = "/root/.pm2/logs/*.log",
+    instance = constants.hostname,
+    job      = "access_application",
+    type     = "app_event",
+  }]
+  forward_to = [loki.write.grafanacloud.receiver]
+}
+
+// access_application — visitors, login events, vault access, object storage activity
+loki.source.file "access_application_nginx" {
+  targets = [{
+    __path__ = "/var/log/nginx/access.log",
+    instance = constants.hostname,
+    job      = "access_application",
+    type     = "visitor",
+  }]
+  forward_to = [loki.write.grafanacloud.receiver]
+}
+
+loki.source.file "access_application_app" {
+  targets = [{
+    __path__ = "/root/.pm2/logs/*.log",
+    instance = constants.hostname,
+    job      = "access_application",
+    type     = "app_event",
+  }]
+  forward_to = [loki.write.grafanacloud.receiver]
+}
+
+loki.source.file "access_application_vault" {
+  targets = [{
+    __path__ = "/var/log/vault-agent.log",
+    instance = constants.hostname,
+    job      = "access_application",
+    type     = "vault_access",
+  }]
+  forward_to = [loki.write.grafanacloud.receiver]
+}
+
+loki.source.file "access_application_storage" {
+  targets = [{
+    __path__ = "/var/log/object-storage.log",
+    instance = constants.hostname,
+    job      = "access_application",
+    type     = "storage_event",
+  }]
+  forward_to = [loki.write.grafanacloud.receiver]
+}
+
 loki.write "grafanacloud" {
   endpoint {
     url = "https://logs-prod-042.grafana.net/loki/api/v1/push"

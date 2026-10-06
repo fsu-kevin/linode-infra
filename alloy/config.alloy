@@ -30,7 +30,6 @@ prometheus.scrape "alloy_health" {
   job_name   = "integrations/alloy"
 }
 
-// Ship to Grafana Cloud
 prometheus.remote_write "metrics_service" {
   endpoint {
     url = "https://prometheus-prod-66-prod-us-east-3.grafana.net/api/prom/push"
@@ -41,28 +40,8 @@ prometheus.remote_write "metrics_service" {
   }
 }
 
-// App logs (PM2)
-loki.source.file "app_logs" {
-  targets = [{
-    __path__ = "/root/.pm2/logs/*.log",
-    instance = constants.hostname,
-    job      = "app",
-  }]
-  forward_to = [loki.write.grafanacloud.receiver]
-}
-
-// nginx access logs
-loki.source.file "nginx_logs" {
-  targets = [{
-    __path__ = "/var/log/nginx/access.log",
-    instance = constants.hostname,
-    job      = "nginx",
-  }]
-  forward_to = [loki.write.grafanacloud.receiver]
-}
-
-// Access logs — visitor traffic and application login events
-loki.source.file "access_application_nginx" {
+// access_application: visitors, app events, vault access, object storage activity
+loki.source.file "access_nginx" {
   targets = [{
     __path__ = "/var/log/nginx/access.log",
     instance = constants.hostname,
@@ -72,7 +51,7 @@ loki.source.file "access_application_nginx" {
   forward_to = [loki.write.grafanacloud.receiver]
 }
 
-loki.source.file "access_application_app" {
+loki.source.file "access_app" {
   targets = [{
     __path__ = "/root/.pm2/logs/*.log",
     instance = constants.hostname,
@@ -82,28 +61,7 @@ loki.source.file "access_application_app" {
   forward_to = [loki.write.grafanacloud.receiver]
 }
 
-// access_application — visitors, login events, vault access, object storage activity
-loki.source.file "access_application_nginx" {
-  targets = [{
-    __path__ = "/var/log/nginx/access.log",
-    instance = constants.hostname,
-    job      = "access_application",
-    type     = "visitor",
-  }]
-  forward_to = [loki.write.grafanacloud.receiver]
-}
-
-loki.source.file "access_application_app" {
-  targets = [{
-    __path__ = "/root/.pm2/logs/*.log",
-    instance = constants.hostname,
-    job      = "access_application",
-    type     = "app_event",
-  }]
-  forward_to = [loki.write.grafanacloud.receiver]
-}
-
-loki.source.file "access_application_vault" {
+loki.source.file "access_vault" {
   targets = [{
     __path__ = "/var/log/vault-agent.log",
     instance = constants.hostname,
@@ -113,7 +71,7 @@ loki.source.file "access_application_vault" {
   forward_to = [loki.write.grafanacloud.receiver]
 }
 
-loki.source.file "access_application_storage" {
+loki.source.file "access_storage" {
   targets = [{
     __path__ = "/var/log/object-storage.log",
     instance = constants.hostname,

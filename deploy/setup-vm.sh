@@ -4,6 +4,9 @@ set -e
 LOG_FILE="/tmp/setup-vm.log"
 exec > >(tee "$LOG_FILE") 2>&1
 
+echo "=== Installing awscli ==="
+apt-get install -q -y awscli
+
 echo "=== Building backend ==="
 echo "LINODE_TOKEN=$LINODE_TOKEN" > /opt/app/backend/.env
 echo "PORT=3001" >> /opt/app/backend/.env

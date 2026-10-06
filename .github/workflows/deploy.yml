@@ -257,12 +257,12 @@ jobs:
               SECRET=\$(vault kv get -field=object_storage_secret secret/linode | tr -d '[:space:]')
               BUCKET=\$(vault kv get -field=bucket_name secret/linode | tr -d '[:space:]/')
               REGION=\$(vault kv get -field=bucket_region secret/linode | tr -d '[:space:]')
-              which aws || apt-get install -q -y awscli
               AWS_ACCESS_KEY_ID=\$KEY AWS_SECRET_ACCESS_KEY=\$SECRET \
                 aws s3 cp /tmp/$ARCHIVE s3://\$BUCKET/logs/$ARCHIVE \
-                --endpoint-url https://\$REGION.linodeobjects.com
-              echo 'Uploaded: $ARCHIVE'
-            " || echo "Could not upload logs for $LABEL"
+                --endpoint-url https://\$REGION.linodeobjects.com \
+                --region \$REGION
+              echo 'Uploaded: logs/$ARCHIVE'
+            " && echo "Log upload done for $LABEL" || echo "WARNING: log upload failed for $LABEL"
           done
 
       - name: Verify

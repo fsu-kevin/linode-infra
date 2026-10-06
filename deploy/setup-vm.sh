@@ -38,23 +38,33 @@ BUCKET=$(vault kv get -field=bucket_name secret/linode | tr -d '[:space:]/')
 REGION=$(vault kv get -field=bucket_region secret/linode | tr -d '[:space:]')
 echo "Bucket: $BUCKET Region: $REGION"
 
-echo "${OBJ_KEY}:${OBJ_SECRET}" > /root/.passwd-s3fs
+printf '%s:%s\n' "$OBJ_KEY" "$OBJ_SECRET" > /root/.passwd-s3fs
 chmod 600 /root/.passwd-s3fs
 mkdir -p /mnt/backup
 
-# Force remount — stale mounts from previous deploys cause connection aborts
+# Force remount
 umount -l /mnt/backup 2>/dev/null || true
 s3fs ${BUCKET} /mnt/backup \
   -o passwd_file=/root/.passwd-s3fs \
   -o url=https://${REGION}.linodeobjects.com \
-  -o use_path_request_style
+  -o use_path_request_style \
+  -o dbglevel=err \
+  -o logfile=/tmp/s3fs.log
 
-grep -q "s3fs" /etc/fstab || \
-  echo "${BUCKET} /mnt/backup fuse.s3fs _netdev,allow_other,use_path_request_style,passwd_file=/root/.passwd-s3fs,url=https://${REGION}.linodeobjects.com 0 0" >> /etc/fstab
-
-echo "=== Backing up configs ==="
-mkdir -p /mnt/backup/configs
-cp /etc/alloy/config.alloy /mnt/backup/configs/
-cp /etc/vault.d/agent.hcl /mnt/backup/configs/
+# Verify mount is functional before using it
+if ls /mnt/backup/ > /dev/null 2>&1; then
+  grep -q "s3fs" /etc/fstab || \
+    echo "${BUCKET} /mnt/backup fuse.s3fs _netdev,allow_other,use_path_request_style,passwd_file=/root/.passwd-s3fs,url=https://${REGION}.linodeobjects.com 0 0" >> /etc/fstab
+  echo "=== Backing up configs ==="
+  mkdir -p /mnt/backup/configs
+  cp /etc/alloy/config.alloy /mnt/backup/configs/
+  cp /etc/vault.d/agent.hcl /mnt/backup/configs/
+  echo "Configs backed up to bucket"
+else
+  echo "WARNING: s3fs mount not functional, skipping config backup"
+  echo "=== s3fs error log ==="
+  cat /tmp/s3fs.log || true
+  umount -l /mnt/backup 2>/dev/null || true
+fi
 
 echo "=== Setup complete ==="

@@ -14,35 +14,37 @@ jobs:
       - name: Checkout
         uses: actions/checkout@v4
 
-      - name: Install linode-cli
-        run: pip3 install linode-cli
 
       - name: Provision VM if not exists
-        env:
-          LINODE_CLI_TOKEN: ${{ secrets.LINODE_TOKEN }}
         run: |
-          EXISTS=$(linode-cli linodes list --json | jq '[.[] | select(.label=="app-prod-1")] | length')
+          EXISTS=$(curl -s -H "Authorization: Bearer ${{ secrets.LINODE_TOKEN }}" \
+            https://api.linode.com/v4/linode/instances | \
+            jq '[.data[] | select(.label=="app-prod-1")] | length')
           if [ "$EXISTS" -eq 0 ]; then
             echo "Provisioning new VM..."
-            linode-cli linodes create \
-              --image linode/ubuntu22.04 \
-              --region us-east \
-              --type g6-nanode-1 \
-              --label app-prod-1 \
-              --root_pass "${{ secrets.VM_ROOT_PASS }}" \
-              --private_ip true \
-              --metadata.user_data "$(base64 -w0 cloud-init.yaml)"
+            curl -s -H "Authorization: Bearer ${{ secrets.LINODE_TOKEN }}" \
+              -H "Content-Type: application/json" \
+              -X POST https://api.linode.com/v4/linode/instances \
+              -d "{
+                \"image\": \"linode/ubuntu22.04\",
+                \"region\": \"us-east\",
+                \"type\": \"g6-nanode-1\",
+                \"label\": \"app-prod-1\",
+                \"root_pass\": \"${{ secrets.VM_ROOT_PASS }}\",
+                \"private_ip\": true,
+                \"metadata\": {\"user_data\": \"$(base64 -w0 cloud-init.yaml)\"}
+              }"
           else
             echo "VM already exists, skipping provision"
           fi
 
       - name: Wait for VM to be running
-        env:
-          LINODE_CLI_TOKEN: ${{ secrets.LINODE_TOKEN }}
         run: |
           echo "Waiting for VM to reach running state..."
           for i in $(seq 1 24); do
-            STATUS=$(linode-cli linodes list --json | jq -r '.[] | select(.label=="app-prod-1") | .status')
+            STATUS=$(curl -s -H "Authorization: Bearer ${{ secrets.LINODE_TOKEN }}" \
+              https://api.linode.com/v4/linode/instances | \
+              jq -r '.data[] | select(.label=="app-prod-1") | .status')
             echo "Attempt $i: status=$STATUS"
             if [ "$STATUS" = "running" ]; then
               echo "VM is running"
@@ -57,10 +59,10 @@ jobs:
 
       - name: Get VM IP
         id: get_ip
-        env:
-          LINODE_CLI_TOKEN: ${{ secrets.LINODE_TOKEN }}
         run: |
-          IP=$(linode-cli linodes list --json | jq -r '.[] | select(.label=="app-prod-1") | .ipv4[0]')
+          IP=$(curl -s -H "Authorization: Bearer ${{ secrets.LINODE_TOKEN }}" \
+            https://api.linode.com/v4/linode/instances | \
+            jq -r '.data[] | select(.label=="app-prod-1") | .ipv4[0]')
           echo "vm_ip=$IP" >> $GITHUB_OUTPUT
           echo "VM IP: $IP"
           if [ -z "$IP" ]; then

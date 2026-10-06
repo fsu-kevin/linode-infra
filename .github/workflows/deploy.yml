@@ -1,0 +1,157 @@
+name: Deploy
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  provision:
+    runs-on: ubuntu-latest
+    outputs:
+      vm_ip: ${{ steps.get_ip.outputs.vm_ip }}
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Install linode-cli
+        run: pip3 install linode-cli
+
+      - name: Provision VM if not exists
+        env:
+          LINODE_CLI_TOKEN: ${{ secrets.LINODE_TOKEN }}
+        run: |
+          EXISTS=$(linode-cli linodes list --json | jq '[.[] | select(.label=="app-prod-1")] | length')
+          if [ "$EXISTS" -eq 0 ]; then
+            echo "Provisioning new VM..."
+            linode-cli linodes create \
+              --image linode/ubuntu22.04 \
+              --region us-east \
+              --type g6-nanode-1 \
+              --label app-prod-1 \
+              --root_pass "${{ secrets.VM_ROOT_PASS }}" \
+              --private_ip true \
+              --metadata.user_data "$(base64 -w0 cloud-init.yaml)"
+            echo "Waiting for VM to boot..."
+            sleep 120
+          else
+            echo "VM already exists, skipping provision"
+          fi
+
+      - name: Get VM IP
+        id: get_ip
+        env:
+          LINODE_CLI_TOKEN: ${{ secrets.LINODE_TOKEN }}
+        run: |
+          IP=$(linode-cli linodes list --json | jq -r '.[] | select(.label=="app-prod-1") | .ipv4[0]')
+          echo "vm_ip=$IP" >> $GITHUB_OUTPUT
+          echo "VM IP: $IP"
+
+  deploy:
+    runs-on: ubuntu-latest
+    needs: provision
+
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Setup SSH
+        run: |
+          mkdir -p ~/.ssh
+          echo "${{ secrets.SSH_PRIVATE_KEY }}" > ~/.ssh/id_rsa
+          chmod 600 ~/.ssh/id_rsa
+          ssh-keyscan -H ${{ needs.provision.outputs.vm_ip }} >> ~/.ssh/known_hosts
+
+      - name: Deploy app
+        run: |
+          rsync -avz --exclude 'node_modules' --exclude '.git' \
+            ./ root@${{ needs.provision.outputs.vm_ip }}:/opt/app/
+
+      - name: Install dependencies and restart
+        run: |
+          ssh root@${{ needs.provision.outputs.vm_ip }} << 'EOF'
+            cd /opt/app
+            npm install
+            pm2 restart app || pm2 start npm --name "app" -- start
+            pm2 save
+          EOF
+
+      - name: Push configs to VM
+        run: |
+          ssh root@${{ needs.provision.outputs.vm_ip }} << 'EOF'
+            cp /opt/app/alloy/config.alloy /etc/alloy/config.alloy
+            cp /opt/app/vault/agent.hcl /etc/vault.d/agent.hcl
+          EOF
+
+      - name: Setup Vault Agent token
+        run: |
+          ssh root@${{ needs.provision.outputs.vm_ip }} << 'EOF'
+            echo "${{ secrets.VAULT_AGENT_TOKEN }}" > /etc/vault.d/token
+            chmod 600 /etc/vault.d/token
+          EOF
+
+      - name: Setup Vault Agent service
+        run: |
+          ssh root@${{ needs.provision.outputs.vm_ip }} << 'EOF'
+            cat > /etc/systemd/system/vault-agent.service << 'SVCEOF'
+[Unit]
+Description=Vault Agent
+After=network.target
+
+[Service]
+Environment=VAULT_ADDR=http://192.168.215.38:8200
+ExecStart=/usr/bin/vault agent -config=/etc/vault.d/agent.hcl
+Restart=always
+RestartSec=5
+
+[Install]
+WantedBy=multi-user.target
+SVCEOF
+            systemctl daemon-reload
+            systemctl enable vault-agent
+            systemctl restart vault-agent
+          EOF
+
+      - name: Mount object storage
+        run: |
+          ssh root@${{ needs.provision.outputs.vm_ip }} << 'EOF'
+            export VAULT_ADDR="http://192.168.215.38:8200"
+            export VAULT_TOKEN=$(cat /etc/vault.d/token)
+            OBJ_KEY=$(vault kv get -field=object_storage_key secret/linode)
+            OBJ_SECRET=$(vault kv get -field=object_storage_secret secret/linode)
+            BUCKET=$(vault kv get -field=bucket_name secret/linode)
+            REGION=$(vault kv get -field=bucket_region secret/linode)
+
+            echo "${OBJ_KEY}:${OBJ_SECRET}" > /root/.passwd-s3fs
+            chmod 600 /root/.passwd-s3fs
+            mkdir -p /mnt/backup
+            mountpoint -q /mnt/backup || s3fs ${BUCKET} /mnt/backup \
+              -o passwd_file=/root/.passwd-s3fs \
+              -o url=https://${REGION}.linodeobjects.com \
+              -o use_path_request_style
+
+            grep -q "s3fs" /etc/fstab || echo "${BUCKET} /mnt/backup fuse.s3fs _netdev,allow_other,use_path_request_style,passwd_file=/root/.passwd-s3fs,url=https://${REGION}.linodeobjects.com 0 0" >> /etc/fstab
+          EOF
+
+      - name: Backup configs to object storage
+        run: |
+          ssh root@${{ needs.provision.outputs.vm_ip }} << 'EOF'
+            mkdir -p /mnt/backup/configs
+            cp /etc/alloy/config.alloy /mnt/backup/configs/
+            cp /etc/vault.d/agent.hcl /mnt/backup/configs/
+          EOF
+
+      - name: Verify deployment
+        run: |
+          ssh root@${{ needs.provision.outputs.vm_ip }} << 'EOF'
+            echo "=== PM2 status ==="
+            pm2 status
+            echo "=== Vault Agent ==="
+            systemctl is-active vault-agent
+            echo "=== Alloy health ==="
+            curl -s http://localhost:12345/-/healthy
+            echo "=== nginx ==="
+            systemctl is-active nginx
+            echo "=== Object storage ==="
+            df -h | grep backup
+          EOF

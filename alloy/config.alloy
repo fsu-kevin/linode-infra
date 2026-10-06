@@ -1,0 +1,72 @@
+// Node exporter - VM metrics
+prometheus.exporter.unix "node" {}
+
+prometheus.scrape "node_metrics" {
+  targets         = prometheus.exporter.unix.node.targets
+  forward_to      = [prometheus.remote_write.metrics_service.receiver]
+  scrape_interval = "15s"
+}
+
+// Alloy self health metrics
+prometheus.exporter.self "alloy_health" {}
+
+discovery.relabel "alloy_health" {
+  targets = prometheus.exporter.self.alloy_health.targets
+
+  rule {
+    replacement  = constants.hostname
+    target_label = "instance"
+  }
+
+  rule {
+    target_label = "job"
+    replacement  = "integrations/alloy"
+  }
+}
+
+prometheus.scrape "alloy_health" {
+  targets    = discovery.relabel.alloy_health.output
+  forward_to = [prometheus.remote_write.metrics_service.receiver]
+  job_name   = "integrations/alloy"
+}
+
+// Ship to Grafana Cloud
+prometheus.remote_write "metrics_service" {
+  endpoint {
+    url = "YOUR_PROMETHEUS_REMOTE_WRITE_URL"
+    basic_auth {
+      username = env("GRAFANA_METRICS_USER")
+      password = env("GRAFANA_API_KEY")
+    }
+  }
+}
+
+// App logs (PM2)
+loki.source.file "app_logs" {
+  targets = [{
+    __path__ = "/root/.pm2/logs/*.log",
+    instance = constants.hostname,
+    job      = "app",
+  }]
+  forward_to = [loki.write.grafanacloud.receiver]
+}
+
+// nginx access logs
+loki.source.file "nginx_logs" {
+  targets = [{
+    __path__ = "/var/log/nginx/access.log",
+    instance = constants.hostname,
+    job      = "nginx",
+  }]
+  forward_to = [loki.write.grafanacloud.receiver]
+}
+
+loki.write "grafanacloud" {
+  endpoint {
+    url = "YOUR_LOKI_PUSH_URL"
+    basic_auth {
+      username = env("GRAFANA_LOKI_USER")
+      password = env("GRAFANA_API_KEY")
+    }
+  }
+}

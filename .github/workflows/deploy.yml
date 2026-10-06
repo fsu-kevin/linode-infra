@@ -226,6 +226,10 @@ jobs:
             sleep 15
           done
 
+      - name: Wait for cloud-init
+        run: |
+          ssh root@${{ needs.provision.outputs.vm_ip }} "cloud-init status --wait && echo 'cloud-init done'"
+
       - name: Deploy app
         run: |
           rsync -avz --exclude 'node_modules' --exclude '.git' \

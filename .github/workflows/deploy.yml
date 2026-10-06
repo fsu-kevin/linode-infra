@@ -93,20 +93,7 @@ jobs:
       - name: Setup Vault Agent service
         run: |
           ssh root@${{ needs.provision.outputs.vm_ip }} << 'EOF'
-            cat > /etc/systemd/system/vault-agent.service << 'SVCEOF'
-[Unit]
-Description=Vault Agent
-After=network.target
-
-[Service]
-Environment=VAULT_ADDR=http://192.168.215.38:8200
-ExecStart=/usr/bin/vault agent -config=/etc/vault.d/agent.hcl
-Restart=always
-RestartSec=5
-
-[Install]
-WantedBy=multi-user.target
-SVCEOF
+            printf '[Unit]\nDescription=Vault Agent\nAfter=network.target\n\n[Service]\nEnvironment=VAULT_ADDR=http://192.168.215.38:8200\nExecStart=/usr/bin/vault agent -config=/etc/vault.d/agent.hcl\nRestart=always\nRestartSec=5\n\n[Install]\nWantedBy=multi-user.target\n' > /etc/systemd/system/vault-agent.service
             systemctl daemon-reload
             systemctl enable vault-agent
             systemctl restart vault-agent

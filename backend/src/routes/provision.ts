@@ -43,22 +43,8 @@ async function createFirewall(
   return r.data;
 }
 
-/*
-  POST /api/provision/stack
-  Body: { region, webType, dbType, image, rootPass, label }
-
-  What this does:
-  1. Creates the web server Linode with a public IP + private IP
-  2. Creates the database Linode with a public IP + private IP (we restrict access via firewall)
-  3. Creates a firewall for the web server: allow inbound 80/443 from anywhere, 22 from anywhere
-  4. Creates a firewall for the database: allow inbound 5432 only from the web server's private IP
-     — the database has no open public ports, so it's inaccessible from the internet
-  5. Creates Longview client slots for both nodes and returns install instructions
-
-  Limitation note: Linode's private IPs are region-scoped (same DC). The DB firewall rule
-  uses the web server's private IP, which is only assigned after the Linode is created — so
-  we create the web server first, wait for IP assignment, then create the DB firewall.
-*/
+// Web server is created first so its private IP is available when building the DB firewall rule.
+// Private IPs are only assigned after instance creation, so the order matters here.
 router.post("/stack", async (req: Request, res: Response, next: NextFunction) => {
   try {
     const client = linodeClient(getToken(req));
@@ -75,7 +61,6 @@ router.post("/stack", async (req: Request, res: Response, next: NextFunction) =>
       return res.status(400).json({ errors: [{ reason: "Missing required fields" }] });
     }
 
-    // Step 1: Create the web server Linode (public + private IP)
     const webServer = await client.post("/linode/instances", {
       label: `${label}-web`,
       region,
@@ -91,14 +76,12 @@ router.post("/stack", async (req: Request, res: Response, next: NextFunction) =>
       ip.startsWith("192.168.")
     );
 
-    // Step 2: Create web server firewall — allow HTTP, HTTPS, SSH inbound; drop everything else
     const webFirewall = await createFirewall(client, `${label}-web-fw`, [
       { protocol: "TCP", ports: "80", addresses: { ipv4: ["0.0.0.0/0"], ipv6: ["::/0"] }, action: "ACCEPT", label: "allow-http" },
       { protocol: "TCP", ports: "443", addresses: { ipv4: ["0.0.0.0/0"], ipv6: ["::/0"] }, action: "ACCEPT", label: "allow-https" },
       { protocol: "TCP", ports: "22", addresses: { ipv4: ["0.0.0.0/0"] }, action: "ACCEPT", label: "allow-ssh" },
     ], webId);
 
-    // Step 3: Create the database Linode (private IP enabled, no public-facing ports opened)
     const dbServer = await client.post("/linode/instances", {
       label: `${label}-db`,
       region,
@@ -111,15 +94,14 @@ router.post("/stack", async (req: Request, res: Response, next: NextFunction) =>
     });
     const dbId: number = dbServer.data.id;
 
-    // Step 4: Database firewall — only allow Postgres (5432) from the web server's private IP.
-    // All public inbound traffic is dropped. The DB has no public route.
+    // DB firewall allows port 5432 from the web server's private IP only. Nothing public.
     const dbInbound: object[] = webPrivateIp
       ? [{ protocol: "TCP", ports: "5432", addresses: { ipv4: [`${webPrivateIp}/32`] }, action: "ACCEPT", label: "allow-db-from-web" }]
       : [];
 
     const dbFirewall = await createFirewall(client, `${label}-db-fw`, dbInbound, dbId);
 
-    // Step 5: Create Longview client slots (the install_code is used to configure the agent on each node)
+    // Longview slots — non-fatal, free plan caps at 5 clients
     let webLongview = null;
     let dbLongview = null;
     try {
@@ -133,7 +115,7 @@ router.post("/stack", async (req: Request, res: Response, next: NextFunction) =>
       // Longview creation is non-fatal (free plan allows 5 clients)
     }
 
-    // Step 6: Boot both Linodes now that firewalls are attached
+    // Boot after firewalls are attached so the VMs are never briefly exposed
     await Promise.all([
       client.post(`/linode/instances/${webId}/boot`),
       client.post(`/linode/instances/${dbId}/boot`),

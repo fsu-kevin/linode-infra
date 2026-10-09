@@ -1,0 +1,67 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: linode-infra-frontend
+  namespace: demos
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: linode-infra-frontend
+  template:
+    metadata:
+      labels:
+        app: linode-infra-frontend
+    spec:
+      imagePullSecrets:
+        - name: harbor-pull-secret
+      containers:
+        - name: frontend
+          image: harbor.kevinlapomme.com/kevin/linode-infra-frontend:IMAGE_TAG
+          ports:
+            - containerPort: 80
+          resources:
+            requests:
+              memory: "32Mi"
+              cpu: "25m"
+            limits:
+              memory: "128Mi"
+              cpu: "100m"
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: linode-infra-frontend
+  namespace: demos
+spec:
+  selector:
+    app: linode-infra-frontend
+  ports:
+    - port: 80
+      targetPort: 80
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: linode-infra
+  namespace: demos
+  annotations:
+    nginx.ingress.kubernetes.io/proxy-body-size: "10m"
+    cert-manager.io/cluster-issuer: "letsencrypt-prod"
+spec:
+  ingressClassName: nginx
+  tls:
+    - hosts:
+        - app.kevinlapomme.com
+      secretName: linode-infra-tls
+  rules:
+    - host: app.kevinlapomme.com
+      http:
+        paths:
+          - path: /
+            pathType: Prefix
+            backend:
+              service:
+                name: linode-infra-frontend
+                port:
+                  number: 80

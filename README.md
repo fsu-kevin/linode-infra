@@ -1,8 +1,8 @@
 # linode-infra
 
-A browser-based infrastructure provisioning portal for Akamai Cloud (Linode). Pick a VM template, fill in a few fields, and get a hardened server running in under 60 seconds with the firewall, fail2ban, and SSH hardening already taken care of.
+A self-hosted infrastructure tool I built for managing Linode (Akamai Cloud) servers through a browser. Pick a VM template, fill in a few fields, and get a hardened server running in under 60 seconds.
 
-I built this because every time I spun up a VM manually, something was different. Firewall rules got forgotten. fail2ban never got installed. SSH stayed wide open. This portal makes the secure path the default.
+I got tired of every manually provisioned VM being configured slightly differently. Firewall rules forgotten, fail2ban never installed, SSH wide open. This makes the secure path the only path.
 
 ## What it does
 

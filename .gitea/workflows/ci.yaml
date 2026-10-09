@@ -1,0 +1,46 @@
+name: CI/CD
+
+on:
+  push:
+    branches: [main]
+
+jobs:
+  build-and-deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: transfer code to harbor_push_vm
+        run: |
+          tar czf - . | ssh ${{ secrets.HARBOR_PUSH_VM_USER }}@${{ secrets.HARBOR_PUSH_VM_IP }} \
+            "rm -rf /tmp/linode-infra && mkdir -p /tmp/linode-infra && tar xzf - -C /tmp/linode-infra"
+
+      - name: build frontend image
+        run: |
+          ssh ${{ secrets.HARBOR_PUSH_VM_USER }}@${{ secrets.HARBOR_PUSH_VM_IP }} \
+            "docker build -f /tmp/linode-infra/Dockerfile.frontend \
+             -t harbor.kevinlapomme.com/kevin/linode-infra-frontend:${{ github.sha }} \
+             /tmp/linode-infra"
+
+      - name: build backend image
+        run: |
+          ssh ${{ secrets.HARBOR_PUSH_VM_USER }}@${{ secrets.HARBOR_PUSH_VM_IP }} \
+            "docker build -f /tmp/linode-infra/Dockerfile.backend \
+             -t harbor.kevinlapomme.com/kevin/linode-infra-backend:${{ github.sha }} \
+             /tmp/linode-infra"
+
+      - name: push images to Harbor
+        run: |
+          ssh ${{ secrets.HARBOR_PUSH_VM_USER }}@${{ secrets.HARBOR_PUSH_VM_IP }} << EOF
+          docker login harbor.kevinlapomme.com -u admin -p '${{ secrets.HARBOR_PASSWORD }}'
+          docker push harbor.kevinlapomme.com/kevin/linode-infra-frontend:${{ github.sha }}
+          docker push harbor.kevinlapomme.com/kevin/linode-infra-backend:${{ github.sha }}
+          EOF
+
+      - name: deploy to kubernetes
+        run: |
+          sed -i "s|IMAGE_TAG|${{ github.sha }}|g" k8s/frontend.yaml k8s/backend.yaml
+          kubectl apply -f k8s/namespace.yaml
+          kubectl apply -f k8s/
+          kubectl rollout status deployment/linode-infra-frontend -n demos --timeout=120s
+          kubectl rollout status deployment/linode-infra-backend -n demos --timeout=120s

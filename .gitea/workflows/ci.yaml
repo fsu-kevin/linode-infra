@@ -15,8 +15,12 @@ jobs:
 
       - name: transfer code to harbor_push_vm
         run: |
-          tar czf - . | ssh -o UserKnownHostsFile=/dev/null ${{ secrets.HARBOR_PUSH_VM_USER }}@${{ secrets.HARBOR_PUSH_VM_IP }} \
-            "rm -rf /tmp/linode-infra && mkdir -p /tmp/linode-infra && tar xzf - -C /tmp/linode-infra"
+          echo "workspace contents:"
+          ls -la
+          tar czf /tmp/linode-infra.tar.gz .
+          echo "tar size: $(du -sh /tmp/linode-infra.tar.gz)"
+          cat /tmp/linode-infra.tar.gz | ssh -o UserKnownHostsFile=/dev/null ${{ secrets.HARBOR_PUSH_VM_USER }}@${{ secrets.HARBOR_PUSH_VM_IP }} \
+            "rm -rf /tmp/linode-infra && mkdir -p /tmp/linode-infra && cat > /tmp/linode-infra.tar.gz && tar xzf /tmp/linode-infra.tar.gz -C /tmp/linode-infra && echo 'files:' && ls /tmp/linode-infra"
 
       - name: build frontend image
         run: |

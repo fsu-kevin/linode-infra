@@ -25,7 +25,7 @@ jobs:
       - name: build frontend image
         run: |
           ssh -o UserKnownHostsFile=/dev/null ${{ secrets.HARBOR_PUSH_VM_USER }}@${{ secrets.HARBOR_PUSH_VM_IP }} \
-            "cd /tmp/linode-infra && docker build -f Dockerfile.frontend \
+            "ls -la /tmp/linode-infra/Dockerfile.frontend && head -3 /tmp/linode-infra/Dockerfile.frontend && cd /tmp/linode-infra && docker build -f Dockerfile.frontend \
              -t harbor.kevinlapomme.com/kevin/linode-infra-frontend:${{ github.sha }} ."
 
       - name: build backend image

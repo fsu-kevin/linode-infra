@@ -38,11 +38,11 @@ jobs:
 
       - name: push images to Harbor
         run: |
-          ssh -o UserKnownHostsFile=/dev/null ${{ secrets.HARBOR_PUSH_VM_USER }}@${{ secrets.HARBOR_PUSH_VM_IP }} << EOF
-          docker login harbor.kevinlapomme.com -u admin -p '${{ secrets.HARBOR_PASSWORD }}'
-          docker push harbor.kevinlapomme.com/kevin/linode-infra-frontend:${{ github.sha }}
-          docker push harbor.kevinlapomme.com/kevin/linode-infra-backend:${{ github.sha }}
-          EOF
+          echo '${{ secrets.HARBOR_PASSWORD }}' | ssh -o UserKnownHostsFile=/dev/null ${{ secrets.HARBOR_PUSH_VM_USER }}@${{ secrets.HARBOR_PUSH_VM_IP }} \
+            "docker login harbor.kevinlapomme.com -u admin --password-stdin"
+          ssh -o UserKnownHostsFile=/dev/null ${{ secrets.HARBOR_PUSH_VM_USER }}@${{ secrets.HARBOR_PUSH_VM_IP }} \
+            "docker push harbor.kevinlapomme.com/kevin/linode-infra-frontend:${{ github.sha }} && \
+             docker push harbor.kevinlapomme.com/kevin/linode-infra-backend:${{ github.sha }}"
 
       - name: deploy to kubernetes
         run: |

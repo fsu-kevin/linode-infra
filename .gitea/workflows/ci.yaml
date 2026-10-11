@@ -17,23 +17,23 @@ jobs:
         run: |
           echo "workspace contents:"
           ls -la
-          tar czf /tmp/linode-infra.tar.gz .
-          echo "tar size: $(du -sh /tmp/linode-infra.tar.gz)"
-          cat /tmp/linode-infra.tar.gz | ssh -o UserKnownHostsFile=/dev/null ${{ secrets.HARBOR_PUSH_VM_USER }}@${{ secrets.HARBOR_PUSH_VM_IP }} \
-            "rm -rf /tmp/linode-infra && mkdir -p /tmp/linode-infra && cat > /tmp/linode-infra.tar.gz && tar xzf /tmp/linode-infra.tar.gz -C /tmp/linode-infra && echo 'files:' && ls /tmp/linode-infra"
+          tar czf /root/linode-infra.tar.gz .
+          echo "tar size: $(du -sh /root/linode-infra.tar.gz)"
+          cat /root/linode-infra.tar.gz | ssh -o UserKnownHostsFile=/dev/null ${{ secrets.HARBOR_PUSH_VM_USER }}@${{ secrets.HARBOR_PUSH_VM_IP }} \
+            "rm -rf /root/linode-infra && mkdir -p /root/linode-infra && cat > /root/linode-infra.tar.gz && tar xzf /root/linode-infra.tar.gz -C /root/linode-infra && echo 'files:' && ls /root/linode-infra"
 
       - name: build frontend image
         run: |
           ssh -o UserKnownHostsFile=/dev/null ${{ secrets.HARBOR_PUSH_VM_USER }}@${{ secrets.HARBOR_PUSH_VM_IP }} \
-            "cp /tmp/linode-infra/Dockerfile.frontend /tmp/linode-infra/Dockerfile && \
-             cd /tmp/linode-infra && docker build \
+            "cp /root/linode-infra/Dockerfile.frontend /root/linode-infra/Dockerfile && \
+             cd /root/linode-infra && docker build \
              -t harbor.kevinlapomme.com/kevin/linode-infra-frontend:${{ github.sha }} ."
 
       - name: build backend image
         run: |
           ssh -o UserKnownHostsFile=/dev/null ${{ secrets.HARBOR_PUSH_VM_USER }}@${{ secrets.HARBOR_PUSH_VM_IP }} \
-            "cp /tmp/linode-infra/Dockerfile.backend /tmp/linode-infra/Dockerfile && \
-             cd /tmp/linode-infra && docker build \
+            "cp /root/linode-infra/Dockerfile.backend /root/linode-infra/Dockerfile && \
+             cd /root/linode-infra && docker build \
              -t harbor.kevinlapomme.com/kevin/linode-infra-backend:${{ github.sha }} ."
 
       - name: push images to Harbor

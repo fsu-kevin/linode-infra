@@ -17,7 +17,7 @@ spec:
         - name: harbor-pull-secret
       containers:
         - name: frontend
-          image: harbor.kevinlapomme.com/kevin/linode-infra-frontend:IMAGE_TAG
+          image: harbor.kevinlapomme.com/platform/linode-infra-frontend:IMAGE_TAG
           ports:
             - containerPort: 80
           resources:

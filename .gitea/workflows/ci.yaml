@@ -27,14 +27,14 @@ jobs:
           ssh -o UserKnownHostsFile=/dev/null ${{ secrets.HARBOR_PUSH_VM_USER }}@${{ secrets.HARBOR_PUSH_VM_IP }} \
             "cp /root/linode-infra/Dockerfile.frontend /root/linode-infra/Dockerfile && \
              cd /root/linode-infra && docker build \
-             -t harbor.kevinlapomme.com/kevin/linode-infra-frontend:${{ github.sha }} ."
+             -t harbor.kevinlapomme.com/platform/linode-infra-frontend:${{ github.sha }} ."
 
       - name: build backend image
         run: |
           ssh -o UserKnownHostsFile=/dev/null ${{ secrets.HARBOR_PUSH_VM_USER }}@${{ secrets.HARBOR_PUSH_VM_IP }} \
             "cp /root/linode-infra/Dockerfile.backend /root/linode-infra/Dockerfile && \
              cd /root/linode-infra && docker build \
-             -t harbor.kevinlapomme.com/kevin/linode-infra-backend:${{ github.sha }} ."
+             -t harbor.kevinlapomme.com/platform/linode-infra-backend:${{ github.sha }} ."
 
       - name: push images to Harbor
         run: |
@@ -42,8 +42,8 @@ jobs:
           ssh -o UserKnownHostsFile=/dev/null ${{ secrets.HARBOR_PUSH_VM_USER }}@${{ secrets.HARBOR_PUSH_VM_IP }} \
             "mkdir -p /root/.docker && \
              echo '{\"auths\":{\"harbor.kevinlapomme.com\":{\"auth\":\"'${AUTH}'\"}}}' > /root/.docker/config.json && \
-             docker push harbor.kevinlapomme.com/kevin/linode-infra-frontend:${{ github.sha }} && \
-             docker push harbor.kevinlapomme.com/kevin/linode-infra-backend:${{ github.sha }}"
+             docker push harbor.kevinlapomme.com/platform/linode-infra-frontend:${{ github.sha }} && \
+             docker push harbor.kevinlapomme.com/platform/linode-infra-backend:${{ github.sha }}"
 
       - name: deploy to kubernetes
         run: |

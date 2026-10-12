@@ -52,10 +52,10 @@ spec:
   ingressClassName: nginx
   tls:
     - hosts:
-        - app.kevinlapomme.com
+        - linode-infra.kevinlapomme.com
       secretName: linode-infra-tls
   rules:
-    - host: app.kevinlapomme.com
+    - host: linode-infra.kevinlapomme.com
       http:
         paths:
           - path: /
